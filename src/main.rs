@@ -1,25 +1,20 @@
 #![feature(array_windows)]
 
-use clap::{
-    AppSettings::{ColoredHelp, DeriveDisplayOrder, UnifiedHelpMessage},
-    Clap,
-};
+use argh::FromArgs;
 use eyre::Result;
-use fs::File;
 use std::{
     collections::HashMap,
-    fs,
+    fs::File,
     io::{BufRead, BufReader},
     iter::{once, FromIterator},
     path::PathBuf,
 };
 
-#[derive(Clap, Debug)]
-#[cfg_attr(test, derive(Default))]
-#[clap(version, about, setting = ColoredHelp, setting = DeriveDisplayOrder, setting = UnifiedHelpMessage)]
-pub(crate) struct Opts {
+#[derive(FromArgs)]
+/// opts
+struct Opts {
     /// input file
-    #[clap()]
+    #[argh(option)]
     input: PathBuf,
 }
 
@@ -31,10 +26,53 @@ struct Graph {
     inc: AdjacencyList,
 }
 
+impl Graph {
+    fn out(&self, node: usize) -> &[usize] {
+        self.out.rels(node)
+    }
+
+    fn inc(&self, node: usize) -> &[usize] {
+        self.inc.rels(node)
+    }
+
+    fn out_degree(&self, node: usize) -> usize {
+        self.out.degree(node)
+    }
+
+    fn inc_degree(&self, node: usize) -> usize {
+        self.inc.degree(node)
+    }
+
+    fn threshold(&self) -> usize {
+        self.rel_count / 20
+    }
+}
+
 #[derive(Debug)]
 struct AdjacencyList {
     offsets: Vec<usize>,
     targets: Vec<usize>,
+}
+
+impl AdjacencyList {
+    fn degree(&self, node: usize) -> usize {
+        let start = self.offsets[node];
+        let end = self
+            .offsets
+            .get(node + 1)
+            .copied()
+            .unwrap_or(self.targets.len());
+        end - start
+    }
+    fn rels(&self, node: usize) -> &[usize] {
+        let start = self.offsets[node];
+        let end = self
+            .offsets
+            .get(node + 1)
+            .copied()
+            .unwrap_or(self.targets.len());
+        &self.targets[start..end]
+    }
 }
 
 #[derive(Debug)]
@@ -93,14 +131,242 @@ impl FromIterator<usize> for Graph {
     }
 }
 
-fn main() -> Result<()> {
-    // if Term::stdout().features().is_attended() {
-    //     color_eyre::config::HookBuilder::default()
-    //         .display_env_section(false)
-    //         .install()?
-    // }
+pub(crate) mod ligra {
+    use super::*;
+    use downcast_rs::{impl_downcast, Downcast};
 
-    let opts = Opts::parse();
+    pub trait NodeSet: Downcast {
+        fn empty(node_count: usize) -> Self
+        where
+            Self: Sized;
+
+        fn len(&self) -> usize;
+
+        fn add(&mut self, target: usize);
+
+        fn contains(&self, value: usize) -> bool;
+
+        fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a>;
+    }
+
+    impl_downcast!(NodeSet);
+
+    #[derive(Debug, Default)]
+    struct SparseNodeSet {
+        values: Vec<usize>,
+    }
+
+    impl NodeSet for SparseNodeSet {
+        fn empty(_node_count: usize) -> Self {
+            Self::default()
+        }
+
+        fn len(&self) -> usize {
+            self.values.len()
+        }
+
+        fn add(&mut self, target: usize) {
+            self.values.push(target);
+        }
+
+        fn contains(&self, value: usize) -> bool {
+            self.values.contains(&value)
+        }
+
+        fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a> {
+            Box::new(self.values.iter().copied())
+        }
+    }
+
+    pub(crate) struct DenseNodeSet {
+        values: Vec<bool>,
+        cardinality: usize,
+    }
+
+    impl DenseNodeSet {
+        pub(crate) fn full(node_count: usize) -> Self {
+            Self {
+                values: vec![true; node_count],
+                cardinality: node_count,
+            }
+        }
+    }
+
+    impl NodeSet for DenseNodeSet {
+        fn empty(node_count: usize) -> Self {
+            Self {
+                values: vec![false; node_count],
+                cardinality: 0,
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.cardinality
+        }
+
+        fn add(&mut self, target: usize) {
+            self.cardinality += 1;
+            self.values[target] = true;
+        }
+
+        fn contains(&self, value: usize) -> bool {
+            self.values[value]
+        }
+
+        fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a> {
+            Box::new(
+                self.values
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(value, contains)| if *contains { Some(value) } else { None }),
+            )
+        }
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn relationship_map(
+        G: &Graph,
+        U: &dyn NodeSet,
+        F: impl FnMut(usize, usize) -> bool,
+        C: impl Fn(usize) -> bool,
+    ) -> Box<dyn NodeSet> {
+        let cost = U.len() + U.iter().map(|node| G.out_degree(node)).sum::<usize>();
+        if cost > G.threshold() {
+            Box::new(relationship_map_dense(G, U, F, C))
+        } else {
+            Box::new(relationship_map_sparse(G, U, F, C))
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn relationship_map_sparse(
+        G: &Graph,
+        U: &dyn NodeSet,
+        mut F: impl FnMut(usize, usize) -> bool,
+        C: impl Fn(usize) -> bool,
+    ) -> SparseNodeSet {
+        let mut result = SparseNodeSet::empty(G.node_count);
+        for source in U.iter() {
+            for &target in G.out(source) {
+                if C(target) && F(source, target) {
+                    result.add(target);
+                }
+            }
+        }
+
+        // TODO: distinct
+
+        result
+    }
+
+    #[allow(non_snake_case)]
+    fn relationship_map_dense(
+        G: &Graph,
+        U: &dyn NodeSet,
+        mut F: impl FnMut(usize, usize) -> bool,
+        C: impl Fn(usize) -> bool,
+    ) -> DenseNodeSet {
+        let mut result = DenseNodeSet::empty(G.node_count);
+        for target in 0..G.node_count {
+            if C(target) {
+                for &source in G.inc(target) {
+                    if U.contains(source) && F(source, target) {
+                        result.add(target);
+                    }
+                    if !C(target) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn node_map(
+        G: &Graph,
+        U: &dyn NodeSet,
+        F: impl FnMut(usize) -> bool,
+    ) -> Box<dyn NodeSet> {
+        if let Some(sparse) = U.downcast_ref::<SparseNodeSet>() {
+            Box::new(node_map_sparse(G, sparse, F))
+        } else if let Some(dense) = U.downcast_ref::<DenseNodeSet>() {
+            Box::new(node_map_dense(G, dense, F))
+        } else {
+            unreachable!("there is a new node set in town")
+        }
+    }
+
+    macro_rules! node_map_impl {
+        ($name:ident: $node_map:ty) => {
+            #[allow(non_snake_case)]
+            fn $name(G: &Graph, U: &$node_map, mut F: impl FnMut(usize) -> bool) -> $node_map {
+                let mut result = <$node_map>::empty(G.node_count);
+                for node in U.iter() {
+                    if F(node) {
+                        result.add(node);
+                    }
+                }
+                result
+            }
+        };
+    }
+
+    node_map_impl!(node_map_sparse: SparseNodeSet);
+    node_map_impl!(node_map_dense: DenseNodeSet);
+}
+
+mod cc {
+    use super::*;
+
+    struct CC {
+        ids: Vec<usize>,
+        prev_ids: Vec<usize>,
+    }
+
+    impl CC {
+        fn new(node_count: usize) -> Self {
+            Self {
+                ids: (0..node_count).collect(),
+                prev_ids: vec![0; node_count],
+            }
+        }
+
+        fn update(&mut self, source: usize, target: usize) -> bool {
+            let original_id = self.ids[target];
+            if self.ids[source] < original_id {
+                self.ids[target] = self.ids[source];
+                original_id == self.prev_ids[target]
+            } else {
+                false
+            }
+        }
+
+        fn copy(&mut self, node: usize) -> bool {
+            self.prev_ids[node] = self.ids[node];
+            true
+        }
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn cc(G: Graph) -> Vec<usize> {
+        let mut cc = CC::new(G.node_count);
+
+        let frontier = ligra::DenseNodeSet::full(G.node_count);
+        let mut frontier: Box<dyn ligra::NodeSet> = Box::new(frontier);
+
+        while frontier.len() != 0 {
+            frontier = ligra::node_map(&G, &*frontier, |node| cc.copy(node));
+            frontier = ligra::relationship_map(&G, &*frontier, |s, t| cc.update(s, t), |_| true);
+        }
+
+        cc.ids
+    }
+}
+
+fn main() -> Result<()> {
+    let opts: Opts = argh::from_env();
     let file = File::open(opts.input)?;
     let input = BufReader::new(file);
 
@@ -128,8 +394,9 @@ fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     let graph = input.into_iter().collect::<Graph>();
+    let cc = cc::cc(graph);
 
-    eprintln!("graph = {:#?}", graph);
+    eprintln!("cc = {:#?}", cc);
 
     Ok(())
 }
