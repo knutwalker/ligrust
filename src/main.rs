@@ -1,39 +1,74 @@
-#![feature(array_windows)]
+#![feature(array_windows, vec_into_raw_parts, new_uninit)]
 
 #[macro_use]
 extern crate eyre;
 
 use argh::FromArgs;
 use atoi::FromRadix10;
+use byte_slice_cast::*;
 use eyre::Result;
 use linereader::LineReader;
-use rayon::prelude::*;
 use std::{
-    collections::HashMap,
     convert::TryFrom,
     fs::File,
-    iter::{once, FromIterator},
+    io::{Read, Write},
     path::PathBuf,
+    slice,
     time::Instant,
 };
+// use rayon::prelude::*;
 
+/// Ligrust - Ligra in rust
 #[derive(FromArgs)]
-/// opts
 struct Opts {
-    /// input file
+    #[argh(subcommand)]
+    command: Command,
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand)]
+enum Command {
+    Parse(ParseInput),
+    CC(RunCC),
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+/// Parsed an input file and dump a binary representation of the graph
+#[argh(subcommand, name = "parse")]
+struct ParseInput {
+    /// input file in "AdjacencyGraph" format
+    #[argh(positional)]
+    input: PathBuf,
+
+    /// output file where to dump the graph to
+    #[argh(option)]
+    output: PathBuf,
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+/// Run conncected components on a parsed input
+#[argh(subcommand, name = "cc")]
+struct RunCC {
+    /// input file in "AdjacencyGraph" format
     #[argh(positional)]
     input: PathBuf,
 }
 
 #[derive(Debug)]
 struct Graph {
-    node_count: usize,
-    rel_count: usize,
     out: AdjacencyList,
     inc: AdjacencyList,
 }
 
 impl Graph {
+    fn node_count(&self) -> usize {
+        self.out.node_count()
+    }
+
+    fn rel_count(&self) -> usize {
+        self.out.rel_count()
+    }
+
     fn out(&self, node: usize) -> &[usize] {
         self.out.rels(node)
     }
@@ -52,18 +87,25 @@ impl Graph {
     }
 
     fn threshold(&self) -> usize {
-        self.rel_count / 20
+        self.rel_count() / 20
     }
 }
 
 #[derive(Debug)]
 struct AdjacencyList {
-    offsets: Vec<usize>,
-    targets: Vec<usize>,
-    nodes: Vec<Node>,
+    nodes: Box<[Node]>,
+    targets: Box<[usize]>,
 }
 
 impl AdjacencyList {
+    fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn rel_count(&self) -> usize {
+        self.targets.len()
+    }
+
     fn degree(&self, node: usize) -> usize {
         self.nodes[node].degree
     }
@@ -84,7 +126,7 @@ struct Node {
 
 impl<R> TryFrom<LineReader<R>> for AdjacencyList
 where
-    R: std::io::Read,
+    R: Read,
 {
     type Error = eyre::Report;
 
@@ -147,22 +189,30 @@ impl From<(Vec<usize>, Vec<usize>)> for AdjacencyList {
         };
 
         let mut nodes = Vec::with_capacity(node_count);
-        offsets
-            .par_windows(2)
-            .map(|offset_pair| match offset_pair {
-                &[offset, next_offset] => Node {
-                    offset,
-                    degree: next_offset - offset,
-                },
-                _ => unreachable!("windows size is 2"),
-            })
-            .collect_into_vec(&mut nodes);
+        for &[offset, next_offset] in offsets.array_windows::<2>() {
+            let node = Node {
+                offset,
+                degree: next_offset - offset,
+            };
+            nodes.push(node);
+        }
+
+        // offsets
+        //     .par_windows(2)
+        //     .map(|offset_pair| match offset_pair {
+        //         &[offset, next_offset] => Node {
+        //             offset,
+        //             degree: next_offset - offset,
+        //         },
+        //         _ => unreachable!("windows size is 2"),
+        //     })
+        //     .collect_into_vec(&mut nodes);
+
         nodes.push(last_node);
 
         AdjacencyList {
-            offsets,
-            targets,
-            nodes,
+            nodes: nodes.into_boxed_slice(),
+            targets: targets.into_boxed_slice(),
         }
     }
 }
@@ -170,12 +220,7 @@ impl From<(Vec<usize>, Vec<usize>)> for AdjacencyList {
 impl From<AdjacencyList> for Graph {
     fn from(out: AdjacencyList) -> Self {
         let inc = out.invert();
-        Graph {
-            node_count: out.offsets.len(),
-            rel_count: out.targets.len(),
-            out,
-            inc,
-        }
+        Graph { out, inc }
     }
 }
 
@@ -188,33 +233,31 @@ impl AdjacencyList {
         temp.resize(rel_count, (usize::max_value(), usize::max_value()));
 
         self.nodes
-            .par_iter()
+            .iter()
             .enumerate()
-            .for_each(|(source, node)| {
-                let offset = node.offset;
-                let next_off = offset + node.degree;
-                for (&target, tmp) in self.targets[offset..next_off]
-                    .iter()
-                    .zip(&mut temp[offset..next_off])
-                {
+            .for_each(|(source, &Node { offset, degree })| {
+                let end = offset + degree;
+                for (&target, tmp) in self.targets[offset..end].iter().zip(&mut temp[offset..end]) {
                     *tmp = (target, source);
                 }
             });
 
-        // let last_entry = [*self.offsets.last().unwrap(), rel_count];
-        // for (source, &[offset, next_off]) in self
-        //     .offsets
-        //     .array_windows::<2>()
-        //     .chain(once(&last_entry))
+        // let (temp, len, cap) = temp.into_raw_parts();
+        // let temp = temp as usize;
+
+        // self.nodes
+        //     .par_iter()
         //     .enumerate()
-        // {
-        //     for (&target, tmp) in self.targets[offset..next_off]
-        //         .iter()
-        //         .zip(&mut temp[offset..next_off])
-        //     {
-        //         *tmp = (target, source);
-        //     }
-        // }
+        //     .for_each(|(source, node)| {
+        //         let offset = node.offset;
+        //         let temp = temp as *mut (usize, usize);
+        //         let temp = unsafe { slice::from_raw_parts_mut(temp.add(offset), node.degree) };
+        //         for (&target, tmp) in self.targets[offset..offset + node.degree].iter().zip(temp) {
+        //             *tmp = (target, source);
+        //         }
+        //     });
+
+        // let mut temp = unsafe { Vec::from_raw_parts(temp as *mut (usize, usize), len, cap) };
 
         temp.sort_by_key(|(target, _)| *target);
 
@@ -351,7 +394,7 @@ pub(crate) mod ligra {
         mut F: impl FnMut(usize, usize) -> bool,
         C: impl Fn(usize) -> bool,
     ) -> SparseNodeSet {
-        let mut result = SparseNodeSet::empty(G.node_count);
+        let mut result = SparseNodeSet::empty(G.node_count());
         for source in U.iter() {
             for &target in G.out(source) {
                 if C(target) && F(source, target) {
@@ -372,8 +415,8 @@ pub(crate) mod ligra {
         mut F: impl FnMut(usize, usize) -> bool,
         C: impl Fn(usize) -> bool,
     ) -> DenseNodeSet {
-        let mut result = DenseNodeSet::empty(G.node_count);
-        for target in 0..G.node_count {
+        let mut result = DenseNodeSet::empty(G.node_count());
+        for target in 0..G.node_count() {
             if C(target) {
                 for &source in G.inc(target) {
                     if U.contains(source) && F(source, target) {
@@ -408,7 +451,7 @@ pub(crate) mod ligra {
         ($name:ident: $node_map:ty) => {
             #[allow(non_snake_case)]
             fn $name(G: &Graph, U: &$node_map, mut F: impl FnMut(usize) -> bool) -> $node_map {
-                let mut result = <$node_map>::empty(G.node_count);
+                let mut result = <$node_map>::empty(G.node_count());
                 for node in U.iter() {
                     if F(node) {
                         result.add(node);
@@ -457,9 +500,9 @@ mod cc {
 
     #[allow(non_snake_case)]
     pub(crate) fn cc(G: Graph) -> Vec<usize> {
-        let mut cc = CC::new(G.node_count);
+        let mut cc = CC::new(G.node_count());
 
-        let frontier = ligra::DenseNodeSet::full(G.node_count);
+        let frontier = ligra::DenseNodeSet::full(G.node_count());
         let mut frontier: Box<dyn ligra::NodeSet> = Box::new(frontier);
 
         while frontier.len() != 0 {
@@ -471,29 +514,126 @@ mod cc {
     }
 }
 
-fn main() -> Result<()> {
-    let mut start = Instant::now();
-
-    let opts: Opts = argh::from_env();
-    let file = File::open(opts.input)?;
+fn parse(input: PathBuf, output: PathBuf) -> Result<()> {
+    let start = Instant::now();
+    let file = File::open(input)?;
+    let output = File::create(output)?;
 
     println!("preparing input: {:?}", start.elapsed());
-    start = Instant::now();
+    let start = Instant::now();
 
     let adjacencies = AdjacencyList::try_from(LineReader::new(file))?;
 
     println!("parsing input: {:?}", start.elapsed());
-    start = Instant::now();
+    let start = Instant::now();
 
     let graph = Graph::from(adjacencies);
 
     println!("building full graph: {:?}", start.elapsed());
-    start = Instant::now();
+
+    dump(graph, output)
+}
+
+fn dump(graph: Graph, mut output: impl Write) -> Result<()> {
+    let start = Instant::now();
+
+    let node_count = graph.node_count();
+    let rel_count = graph.rel_count();
+    let meta = [node_count, rel_count];
+    output.write_all(meta.as_byte_slice())?;
+
+    let Graph { out, inc } = graph;
+
+    let AdjacencyList {
+        nodes: out_nodes,
+        targets: out_targets,
+    } = out;
+
+    let out_nodes = Box::into_raw(out_nodes) as *mut usize;
+    let out_nodes = unsafe { slice::from_raw_parts(out_nodes, node_count * 2) };
+
+    output.write_all(out_nodes.as_byte_slice())?;
+    output.write_all(out_targets.as_byte_slice())?;
+
+    let AdjacencyList {
+        nodes: in_nodes,
+        targets: in_targets,
+    } = inc;
+
+    let in_nodes = Box::into_raw(in_nodes) as *mut usize;
+    let in_nodes = unsafe { slice::from_raw_parts(in_nodes, node_count * 2) };
+
+    output.write_all(in_nodes.as_byte_slice())?;
+    output.write_all(in_targets.as_byte_slice())?;
+
+    println!("serializing graph : {:?}", start.elapsed());
+
+    Ok(())
+}
+
+fn load(mut input: impl Read) -> Result<Graph> {
+    let start = Instant::now();
+
+    let mut meta = [0_usize; 2];
+    input.read_exact(meta.as_mut_byte_slice())?;
+
+    let [node_count, rel_count] = meta;
+
+    let mut out_nodes = Box::<[Node]>::new_uninit_slice(node_count);
+    let out_nodes_ref = out_nodes.as_mut_ptr() as *mut usize;
+    let out_nodes_ref = unsafe { slice::from_raw_parts_mut(out_nodes_ref, node_count * 2) };
+    input.read_exact(out_nodes_ref.as_mut_byte_slice())?;
+
+    let out_targets = Box::<[usize]>::new_uninit_slice(rel_count);
+    let mut out_targets = unsafe { out_targets.assume_init() };
+    input.read_exact(out_targets.as_mut_byte_slice())?;
+
+    let mut in_nodes = Box::<[Node]>::new_uninit_slice(node_count);
+    let in_nodes_ref = in_nodes.as_mut_ptr() as *mut usize;
+    let in_nodes_ref = unsafe { slice::from_raw_parts_mut(in_nodes_ref, node_count * 2) };
+    input.read_exact(in_nodes_ref.as_mut_byte_slice())?;
+
+    let in_targets = Box::<[usize]>::new_uninit_slice(rel_count);
+    let mut in_targets = unsafe { in_targets.assume_init() };
+    input.read_exact(in_targets.as_mut_byte_slice())?;
+
+    let out = AdjacencyList {
+        nodes: unsafe { out_nodes.assume_init() },
+        targets: out_targets,
+    };
+    let inc = AdjacencyList {
+        nodes: unsafe { in_nodes.assume_init() },
+        targets: in_targets,
+    };
+
+    println!("deserializing graph : {:?}", start.elapsed());
+
+    Ok(Graph { out, inc })
+}
+
+fn run_cc(input: PathBuf) -> Result<()> {
+    let start = Instant::now();
+    let file = File::open(input)?;
+
+    println!("preparing input: {:?}", start.elapsed());
+    let start = Instant::now();
+
+    let graph = load(file)?;
+
+    println!("building full graph: {:?}", start.elapsed());
+    let start = Instant::now();
 
     let cc = cc::cc(graph);
 
     println!("cc done with {} nodes: {:?}", cc.len(), start.elapsed());
-    // eprintln!("cc = {:#?}", cc);
 
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let opts: Opts = argh::from_env();
+    match opts.command {
+        Command::Parse(opts) => parse(opts.input, opts.output),
+        Command::CC(opts) => run_cc(opts.input),
+    }
 }
