@@ -1,20 +1,27 @@
 #![feature(array_windows)]
 
+#[macro_use]
+extern crate eyre;
+
 use argh::FromArgs;
+use atoi::FromRadix10;
 use eyre::Result;
+use linereader::LineReader;
+use rustc_hash::FxHashMap;
 use std::{
     collections::HashMap,
+    convert::TryFrom,
     fs::File,
-    io::{BufRead, BufReader},
     iter::{once, FromIterator},
     path::PathBuf,
+    time::Instant,
 };
 
 #[derive(FromArgs)]
 /// opts
 struct Opts {
     /// input file
-    #[argh(option)]
+    #[argh(positional)]
     input: PathBuf,
 }
 
@@ -39,6 +46,7 @@ impl Graph {
         self.out.degree(node)
     }
 
+    #[allow(dead_code)]
     fn inc_degree(&self, node: usize) -> usize {
         self.inc.degree(node)
     }
@@ -79,6 +87,116 @@ impl AdjacencyList {
 struct Node {
     degree: usize,
     offset: usize,
+}
+
+impl<R> TryFrom<LineReader<R>> for AdjacencyList
+where
+    R: std::io::Read,
+{
+    type Error = eyre::Report;
+
+    fn try_from(mut lines: LineReader<R>) -> Result<Self> {
+        let header = lines.next_line().expect("missing header line")?;
+        ensure!(
+            header == b"AdjacencyGraph\n",
+            "Can only read AdjacencyGraph files but got {:?}",
+            std::str::from_utf8(header)
+        );
+
+        let node_count = lines.next_line().expect("missing node count")?;
+        let node_count = atoi::atoi::<usize>(node_count).expect("invalid node count");
+
+        let rel_count = lines.next_line().expect("missing relationship count")?;
+        let rel_count = atoi::atoi::<usize>(rel_count).expect("invalid relationship count");
+
+        let mut offsets = Vec::with_capacity(node_count);
+        let mut targets = Vec::with_capacity(rel_count);
+
+        let mut batch = lines.next_batch().expect("missing graph data")?;
+
+        while offsets.len() < node_count {
+            match usize::from_radix_10(batch) {
+                (_, 0) => {
+                    batch = lines.next_batch().expect("missing offsets")?;
+                }
+                (num, used) => {
+                    offsets.push(num);
+                    batch = &batch[used + 1..];
+                }
+            };
+        }
+
+        while targets.len() < rel_count {
+            match usize::from_radix_10(batch) {
+                (_, 0) => {
+                    batch = lines.next_batch().expect("missing targets")?;
+                }
+                (num, used) => {
+                    targets.push(num);
+                    batch = &batch[used + 1..];
+                }
+            };
+        }
+
+        Ok(AdjacencyList { offsets, targets })
+    }
+}
+
+impl From<AdjacencyList> for Graph {
+    fn from(out: AdjacencyList) -> Self {
+        let inc = out.invert();
+        Graph {
+            node_count: out.offsets.len(),
+            rel_count: out.targets.len(),
+            out,
+            inc,
+        }
+    }
+}
+
+impl AdjacencyList {
+    fn invert(&self) -> Self {
+        let node_count = self.offsets.len();
+        let rel_count = self.targets.len();
+
+        let mut temp = Vec::with_capacity(rel_count);
+        temp.resize(rel_count, (usize::max_value(), usize::max_value()));
+
+        let last_entry = [*self.offsets.last().unwrap(), rel_count];
+        for (source, &[offset, next_off]) in self
+            .offsets
+            .array_windows::<2>()
+            .chain(once(&last_entry))
+            .enumerate()
+        {
+            for (&target, tmp) in self.targets[offset..next_off]
+                .iter()
+                .zip(&mut temp[offset..next_off])
+            {
+                *tmp = (target, source);
+            }
+        }
+
+        temp.sort_by_key(|(target, _)| *target);
+
+        let mut offsets = Vec::with_capacity(node_count);
+        let mut targets = Vec::with_capacity(rel_count);
+
+        let mut last_target = usize::max_value();
+
+        for (target, source) in temp.into_iter() {
+            while target != last_target {
+                offsets.push(targets.len());
+                last_target = last_target.wrapping_add(1);
+            }
+
+            targets.push(source);
+        }
+
+        offsets.extend(std::iter::repeat(targets.len()).take(node_count - last_target));
+
+        Self { offsets, targets }
+    }
 }
 
 impl FromIterator<usize> for Graph {
@@ -366,37 +484,28 @@ mod cc {
 }
 
 fn main() -> Result<()> {
+    let mut start = Instant::now();
+
     let opts: Opts = argh::from_env();
     let file = File::open(opts.input)?;
-    let input = BufReader::new(file);
 
-    let mut input = input.lines();
-    assert_eq!(
-        "AdjacencyGraph",
-        input.next().expect("empty input")?.as_str(),
-        "Can only read AdjacencyGraph files"
-    );
+    println!("preparing input: {:?}", start.elapsed());
+    start = Instant::now();
 
-    fn parse_line(line: std::io::Result<String>) -> Result<Option<usize>> {
-        let line = line?;
-        let line = line.trim();
-        Ok(if !line.is_empty() {
-            let line = line.parse::<usize>()?;
-            Some(line)
-        } else {
-            None
-        })
-    }
+    let adjacencies = AdjacencyList::try_from(LineReader::new(file))?;
 
-    let input = input
-        .map(parse_line)
-        .filter_map(|line| line.transpose())
-        .collect::<Result<Vec<_>>>()?;
+    println!("parsing input: {:?}", start.elapsed());
+    start = Instant::now();
 
-    let graph = input.into_iter().collect::<Graph>();
+    let graph = Graph::from(adjacencies);
+
+    println!("building full graph: {:?}", start.elapsed());
+    start = Instant::now();
+
     let cc = cc::cc(graph);
 
-    eprintln!("cc = {:#?}", cc);
+    println!("cc done with {} nodes: {:?}", cc.len(), start.elapsed());
+    // eprintln!("cc = {:#?}", cc);
 
     Ok(())
 }
