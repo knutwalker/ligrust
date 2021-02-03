@@ -7,7 +7,7 @@ use argh::FromArgs;
 use atoi::FromRadix10;
 use eyre::Result;
 use linereader::LineReader;
-use rustc_hash::FxHashMap;
+use rayon::prelude::*;
 use std::{
     collections::HashMap,
     convert::TryFrom,
@@ -60,30 +60,23 @@ impl Graph {
 struct AdjacencyList {
     offsets: Vec<usize>,
     targets: Vec<usize>,
+    nodes: Vec<Node>,
 }
 
 impl AdjacencyList {
     fn degree(&self, node: usize) -> usize {
-        let start = self.offsets[node];
-        let end = self
-            .offsets
-            .get(node + 1)
-            .copied()
-            .unwrap_or(self.targets.len());
-        end - start
+        self.nodes[node].degree
     }
+
     fn rels(&self, node: usize) -> &[usize] {
-        let start = self.offsets[node];
-        let end = self
-            .offsets
-            .get(node + 1)
-            .copied()
-            .unwrap_or(self.targets.len());
+        let node = self.nodes[node];
+        let start = node.offset;
+        let end = node.degree + start;
         &self.targets[start..end]
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Node {
     degree: usize,
     offset: usize,
@@ -138,7 +131,39 @@ where
             };
         }
 
-        Ok(AdjacencyList { offsets, targets })
+        Ok(Self::from((offsets, targets)))
+    }
+}
+
+impl From<(Vec<usize>, Vec<usize>)> for AdjacencyList {
+    fn from((offsets, targets): (Vec<usize>, Vec<usize>)) -> Self {
+        let node_count = offsets.len();
+        let rel_count = targets.len();
+
+        let last_offset = *offsets.last().unwrap();
+        let last_node = Node {
+            offset: last_offset,
+            degree: rel_count - last_offset,
+        };
+
+        let mut nodes = Vec::with_capacity(node_count);
+        offsets
+            .par_windows(2)
+            .map(|offset_pair| match offset_pair {
+                &[offset, next_offset] => Node {
+                    offset,
+                    degree: next_offset - offset,
+                },
+                _ => unreachable!("windows size is 2"),
+            })
+            .collect_into_vec(&mut nodes);
+        nodes.push(last_node);
+
+        AdjacencyList {
+            offsets,
+            targets,
+            nodes,
+        }
     }
 }
 
@@ -156,26 +181,40 @@ impl From<AdjacencyList> for Graph {
 
 impl AdjacencyList {
     fn invert(&self) -> Self {
-        let node_count = self.offsets.len();
+        let node_count = self.nodes.len();
         let rel_count = self.targets.len();
 
         let mut temp = Vec::with_capacity(rel_count);
         temp.resize(rel_count, (usize::max_value(), usize::max_value()));
 
-        let last_entry = [*self.offsets.last().unwrap(), rel_count];
-        for (source, &[offset, next_off]) in self
-            .offsets
-            .array_windows::<2>()
-            .chain(once(&last_entry))
+        self.nodes
+            .par_iter()
             .enumerate()
-        {
-            for (&target, tmp) in self.targets[offset..next_off]
-                .iter()
-                .zip(&mut temp[offset..next_off])
-            {
-                *tmp = (target, source);
-            }
-        }
+            .for_each(|(source, node)| {
+                let offset = node.offset;
+                let next_off = offset + node.degree;
+                for (&target, tmp) in self.targets[offset..next_off]
+                    .iter()
+                    .zip(&mut temp[offset..next_off])
+                {
+                    *tmp = (target, source);
+                }
+            });
+
+        // let last_entry = [*self.offsets.last().unwrap(), rel_count];
+        // for (source, &[offset, next_off]) in self
+        //     .offsets
+        //     .array_windows::<2>()
+        //     .chain(once(&last_entry))
+        //     .enumerate()
+        // {
+        //     for (&target, tmp) in self.targets[offset..next_off]
+        //         .iter()
+        //         .zip(&mut temp[offset..next_off])
+        //     {
+        //         *tmp = (target, source);
+        //     }
+        // }
 
         temp.sort_by_key(|(target, _)| *target);
 
@@ -195,60 +234,9 @@ impl AdjacencyList {
 
         offsets.extend(std::iter::repeat(targets.len()).take(node_count - last_target));
 
-        Self { offsets, targets }
+        Self::from((offsets, targets))
     }
 }
-
-impl FromIterator<usize> for Graph {
-    fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
-        let mut iter = iter.into_iter();
-        let node_count = iter.next().expect("node count");
-        let rel_count = iter.next().expect("rel count");
-        let out_offsets = iter.by_ref().take(node_count).collect::<Vec<_>>();
-        let out_targets = iter.by_ref().take(rel_count).collect::<Vec<_>>();
-        assert_eq!(iter.count(), 0, "more stuff in the input");
-
-        let mut incoming = HashMap::<_, Vec<_>>::new();
-        let last_entry = [*out_offsets.last().unwrap(), rel_count];
-        for (source, &[offset, next_off]) in out_offsets
-            .array_windows::<2>()
-            .chain(once(&last_entry))
-            .enumerate()
-        {
-            for &target in &out_targets[offset..next_off] {
-                incoming.entry(target).or_default().push(source);
-            }
-        }
-
-        let mut in_offsets = Vec::with_capacity(node_count);
-        let mut in_targets = Vec::with_capacity(rel_count);
-
-        for n in 0..node_count {
-            in_offsets.push(in_targets.len());
-            if let Some(mut sources) = incoming.remove(&n) {
-                sources.sort_unstable();
-                in_targets.extend_from_slice(&sources);
-            }
-        }
-
-        let out = AdjacencyList {
-            offsets: out_offsets,
-            targets: out_targets,
-        };
-        let inc = AdjacencyList {
-            offsets: in_offsets,
-            targets: in_targets,
-        };
-
-        Graph {
-            node_count,
-            rel_count,
-            out,
-            inc,
-        }
-    }
-}
-
 pub(crate) mod ligra {
     use super::*;
     use downcast_rs::{impl_downcast, Downcast};
