@@ -1,56 +1,79 @@
-#![feature(array_windows, vec_into_raw_parts, new_uninit)]
+#![feature(array_windows, never_type, new_uninit, vec_into_raw_parts)]
 
 #[macro_use]
 extern crate eyre;
 
-use argh::FromArgs;
 use atoi::FromRadix10;
 use byte_slice_cast::*;
 use eyre::Result;
 use linereader::LineReader;
+use pico_args::Arguments;
 use std::{
     convert::TryFrom,
+    ffi::OsStr,
     fs::File,
     io::{Read, Write},
     path::PathBuf,
     slice,
     time::Instant,
 };
-// use rayon::prelude::*;
 
-/// Ligrust - Ligra in rust
-#[derive(FromArgs)]
 struct Opts {
-    #[argh(subcommand)]
     command: Command,
 }
 
-#[derive(FromArgs, PartialEq, Debug)]
-#[argh(subcommand)]
+impl Opts {
+    fn parse_from_pico() -> Result<Self> {
+        let mut args = Arguments::from_env();
+
+        fn as_path_buf(arg: &OsStr) -> Result<PathBuf, !> {
+            Ok(PathBuf::from(arg))
+        }
+
+        match args.subcommand()? {
+            Some(c) if c.as_str() == "parse" => {
+                let output = args.value_from_os_str(["-o", "--output"], as_path_buf)?;
+                let input = args.free_from_os_str(as_path_buf)?;
+                let free = args.finish();
+                if !free.is_empty() {
+                    bail!("Unexpected arguments: {:?}", free);
+                }
+                let command = Command::Parse(ParseInput { input, output });
+                Ok(Self { command })
+            }
+            Some(c) if c.as_str() == "cc" => {
+                let input = args.free_from_os_str(as_path_buf)?;
+                let free = args.finish();
+                if !free.is_empty() {
+                    bail!("Unexpected arguments: {:?}", free);
+                }
+                let command = Command::CC(RunCC { input });
+                Ok(Self { command })
+            }
+            _ => {
+                bail!("invalid command, use either parse or cc")
+            }
+        }
+    }
+}
+
 enum Command {
     Parse(ParseInput),
     CC(RunCC),
 }
 
-#[derive(FromArgs, PartialEq, Debug)]
-/// Parsed an input file and dump a binary representation of the graph
-#[argh(subcommand, name = "parse")]
+/// Parses an input file and dump a binary representation of the graph
 struct ParseInput {
     /// input file in "AdjacencyGraph" format
-    #[argh(positional)]
     input: PathBuf,
 
     /// output file where to dump the graph to
-    #[argh(option)]
     output: PathBuf,
 }
 
-#[derive(FromArgs, PartialEq, Debug)]
 /// Run conncected components on a parsed input
-#[argh(subcommand, name = "cc")]
 struct RunCC {
     /// input file in "AdjacencyGraph" format
-    #[argh(positional)]
     input: PathBuf,
 }
 
@@ -631,7 +654,7 @@ fn run_cc(input: PathBuf) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let opts: Opts = argh::from_env();
+    let opts = Opts::parse_from_pico()?;
     match opts.command {
         Command::Parse(opts) => parse(opts.input, opts.output),
         Command::CC(opts) => run_cc(opts.input),
