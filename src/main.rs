@@ -53,8 +53,18 @@ impl Opts {
                 let command = Command::CC(RunCC { input });
                 Ok(Self { command })
             }
+            Some(c) if c.as_str() == "bfs" => {
+                let input = args.free_from_os_str(as_path_buf)?;
+                let source = args.free_from_str::<usize>()?;
+                let free = args.finish();
+                if !free.is_empty() {
+                    bail!("Unexpected arguments: {:?}", free);
+                }
+                let command = Command::BFS(RunBFS { input, source });
+                Ok(Self { command })
+            }
             _ => {
-                bail!("invalid command, use either parse or cc")
+                bail!("invalid command, use either parse, cc or bfs")
             }
         }
     }
@@ -63,6 +73,7 @@ impl Opts {
 enum Command {
     Parse(ParseInput),
     CC(RunCC),
+    BFS(RunBFS),
 }
 
 /// Parses an input file and dump a binary representation of the graph
@@ -78,6 +89,14 @@ struct ParseInput {
 struct RunCC {
     /// input file in "AdjacencyGraph" format
     input: PathBuf,
+}
+
+/// Run BFS on a parsed input
+struct RunBFS {
+    /// input file in "AdjacencyGraph" format
+    input: PathBuf,
+    /// source node to run BFS from
+    source: usize,
 }
 
 #[derive(Debug)]
@@ -151,8 +170,8 @@ struct Node {
 }
 
 impl<R> TryFrom<LineReader<R>> for AdjacencyList
-where
-    R: Read,
+    where
+        R: Read,
 {
     type Error = eyre::Report;
 
@@ -357,6 +376,57 @@ mod cc {
     }
 }
 
+mod bfs {
+    use super::*;
+    use crate::ligra::NodeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct BFS {
+        parents: Vec<AtomicUsize>,
+    }
+
+    impl BFS {
+        fn new(node_count: usize) -> Self {
+            let mut parents = Vec::with_capacity(node_count);
+            parents.resize_with(node_count, || AtomicUsize::new(usize::MAX));
+
+            Self {
+                parents,
+            }
+        }
+
+        fn update(&self, source: usize, target: usize) -> bool {
+            self.parents[target].compare_exchange(usize::MAX, source, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        }
+
+        fn cond(&self, node: usize) -> bool {
+            self.parents[node].load(Ordering::SeqCst) == usize::MAX
+        }
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn bfs(G: Graph, root: usize) -> Vec<AtomicUsize> {
+        let mut bfs = BFS::new(G.node_count());
+        bfs.parents[root] = AtomicUsize::new(root);
+
+        let mut frontier = ligra::SparseNodeSet::empty(G.node_count());
+        frontier.add(root);
+
+        let mut frontier: Box<dyn ligra::NodeSet> = Box::new(frontier);
+
+        while frontier.len() != 0 {
+            frontier = ligra::relationship_map(
+                &G,
+                &*frontier,
+                |s, t| bfs.update(s, t),
+                |node| bfs.cond(node),
+            );
+        }
+
+        bfs.parents
+    }
+}
+
 fn parse(input: PathBuf, output: PathBuf) -> Result<()> {
     let start = Instant::now();
     let file = File::open(input)?;
@@ -473,10 +543,33 @@ fn run_cc(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn run_bfs(input: PathBuf, source: usize) -> Result<()> {
+    let start = Instant::now();
+    let file = File::open(input)?;
+
+    println!("preparing input: {:?}", start.elapsed());
+    let start = Instant::now();
+
+    let graph = load(file)?;
+
+    println!("building full graph: {:?}", start.elapsed());
+    let start = Instant::now();
+
+    let cc = bfs::bfs(graph, source);
+
+    println!("{:?}", cc);
+
+    println!("bfs done with {} nodes: {:?}", cc.len(), start.elapsed());
+
+    Ok(())
+}
+
+
 fn main() -> Result<()> {
     let opts = Opts::parse_from_pico()?;
     match opts.command {
         Command::Parse(opts) => parse(opts.input, opts.output),
         Command::CC(opts) => run_cc(opts.input),
+        Command::BFS(opts) => run_bfs(opts.input, opts.source),
     }
 }

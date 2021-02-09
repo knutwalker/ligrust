@@ -18,7 +18,7 @@ pub trait NodeSet: Downcast {
 impl_downcast!(NodeSet);
 
 #[derive(Debug, Default)]
-struct SparseNodeSet {
+pub(crate) struct SparseNodeSet {
     values: Vec<usize>,
 }
 
