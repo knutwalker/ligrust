@@ -1,5 +1,11 @@
 use super::*;
 use downcast_rs::{impl_downcast, Downcast};
+use rayon::prelude::*;
+
+#[path = "node_set.rs"]
+mod node_set;
+
+pub(crate) use node_set::NodeSubset;
 
 pub trait NodeSet: Downcast {
     fn empty(node_count: usize) -> Self
@@ -92,46 +98,85 @@ impl NodeSet for DenseNodeSet {
 #[allow(non_snake_case)]
 pub(crate) fn relationship_map(
     G: &Graph,
-    U: &dyn NodeSet,
-    F: impl FnMut(usize, usize) -> bool,
-    C: impl Fn(usize) -> bool,
-) -> Box<dyn NodeSet> {
-    let cost = U.len() + U.iter().map(|node| G.out_degree(node)).sum::<usize>();
-    if cost > G.threshold() {
-        Box::new(relationship_map_dense(G, U, F, C))
+    mut U: NodeSubset,
+    F: impl Fn(usize, usize) -> bool + Send + Sync,
+    C: impl Fn(usize) -> bool + Send + Sync,
+) -> NodeSubset {
+    let subset_size = U.len(); // m
+    let mut degrees = Vec::with_capacity(subset_size);
+
+    // TODO: dense iter implementation
+    U.to_sparse();
+    (0..subset_size)
+        .into_par_iter()
+        .map(|i| {
+            let node_id = U.node(i);
+            G.out_degree(node_id)
+        })
+        .collect_into_vec(&mut degrees);
+
+    let out_degrees = degrees.par_iter().sum::<usize>();
+
+    if out_degrees > G.threshold() {
+        U.to_dense();
+        relationship_map_dense(G, U, F, C)
     } else {
-        Box::new(relationship_map_sparse(G, U, F, C))
+        relationship_map_sparse(G, U, degrees, F, C)
     }
 }
 
 #[allow(non_snake_case)]
 fn relationship_map_sparse(
     G: &Graph,
-    U: &dyn NodeSet,
-    mut F: impl FnMut(usize, usize) -> bool,
-    C: impl Fn(usize) -> bool,
-) -> SparseNodeSet {
-    let mut result = SparseNodeSet::empty(G.node_count());
-    for source in U.iter() {
-        for &target in G.out(source) {
-            if C(target) && F(source, target) {
-                result.add(target);
-            }
-        }
-    }
+    U: NodeSubset,
+    degrees: Vec<usize>,
+    F: impl Fn(usize, usize) -> bool + Send + Sync,
+    C: impl Fn(usize) -> bool + Send + Sync,
+) -> NodeSubset {
+    let subset_size = U.len();
 
-    // TODO: distinct
+    // TODO: parallel
+    let out_rel_count = degrees
+        .par_iter_mut()
+        .fold_with(0_usize, |sum, degree| {
+            *degree += sum;
+            *degree
+        })
+        .sum::<usize>();
+    let offsets = degrees;
 
-    result
+    // TODO: we could technically collect into the final
+    // let mut out_rels = Vec::with_capacity(out_rel_count);
+    let out_rels = U
+        .nodes()
+        .par_iter()
+        .zip(offsets.into_par_iter())
+        .flat_map(|(node_id, offset)| {
+            let source = *node_id;
+            // TODO: parallel if d > 1000
+            G.out(source)
+                .par_iter()
+                .enumerate()
+                .filter_map(|(j, &target)| {
+                    if C(target) && F(source, target) {
+                        Some(target)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+
+    NodeSubset::sparse(U.node_count(), out_rels)
 }
 
 #[allow(non_snake_case)]
 fn relationship_map_dense(
     G: &Graph,
-    U: &dyn NodeSet,
+    U: NodeSubset,
     mut F: impl FnMut(usize, usize) -> bool,
     C: impl Fn(usize) -> bool,
-) -> DenseNodeSet {
+) -> NodeSubset {
     let mut result = DenseNodeSet::empty(G.node_count());
     for target in 0..G.node_count() {
         if C(target) {
@@ -146,7 +191,9 @@ fn relationship_map_dense(
         }
     }
 
-    result
+    result;
+
+    todo!()
 }
 
 #[allow(non_snake_case)]

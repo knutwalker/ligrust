@@ -170,8 +170,8 @@ struct Node {
 }
 
 impl<R> TryFrom<LineReader<R>> for AdjacencyList
-    where
-        R: Read,
+where
+    R: Read,
 {
     type Error = eyre::Report;
 
@@ -390,13 +390,13 @@ mod bfs {
             let mut parents = Vec::with_capacity(node_count);
             parents.resize_with(node_count, || AtomicUsize::new(usize::MAX));
 
-            Self {
-                parents,
-            }
+            Self { parents }
         }
 
         fn update(&self, source: usize, target: usize) -> bool {
-            self.parents[target].compare_exchange(usize::MAX, source, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+            self.parents[target]
+                .compare_exchange(usize::MAX, source, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
         }
 
         fn cond(&self, node: usize) -> bool {
@@ -563,7 +563,6 @@ fn run_bfs(input: PathBuf, source: usize) -> Result<()> {
 
     Ok(())
 }
-
 
 fn main() -> Result<()> {
     let opts = Opts::parse_from_pico()?;
