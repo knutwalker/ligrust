@@ -341,7 +341,7 @@ mod cc {
         fn new(node_count: usize) -> Self {
             Self {
                 ids: ligra::par_vec(node_count, AtomicUsize::new),
-                prev_ids: ligra::par_vec(node_count, |_| AtomicUsize::new(0)),
+                prev_ids: ligra::par_vec_with(node_count, || AtomicUsize::new(0)),
             }
         }
 
@@ -382,7 +382,7 @@ mod cc {
         let mut frontier = ligra::NodeSubset::full(G.node_count());
 
         while frontier.len() != 0 {
-            frontier = ligra::node_map(&G, frontier, |node| cc.copy(node));
+            frontier = ligra::node_map(frontier, |node| cc.copy(node));
             frontier = ligra::relationship_map(&G, frontier, |s, t| cc.update(s, t), |_| true);
         }
 

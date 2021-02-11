@@ -1,5 +1,4 @@
 use super::*;
-use downcast_rs::{impl_downcast, Downcast};
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +7,7 @@ mod node_set;
 
 pub(crate) use node_set::NodeSubset;
 
-pub trait NodeSet: Downcast {
+pub trait NodeSet {
     fn empty(node_count: usize) -> Self
     where
         Self: Sized;
@@ -21,8 +20,6 @@ pub trait NodeSet: Downcast {
 
     fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a>;
 }
-
-impl_downcast!(NodeSet);
 
 #[derive(Debug, Default)]
 pub(crate) struct SparseNodeSet {
@@ -54,15 +51,6 @@ impl NodeSet for SparseNodeSet {
 pub(crate) struct DenseNodeSet {
     values: Vec<bool>,
     cardinality: usize,
-}
-
-impl DenseNodeSet {
-    pub(crate) fn full(node_count: usize) -> Self {
-        Self {
-            values: vec![true; node_count],
-            cardinality: node_count,
-        }
-    }
 }
 
 impl NodeSet for DenseNodeSet {
@@ -102,7 +90,7 @@ pub fn par_vec<T: Send>(len: usize, f: impl Fn(usize) -> T + Send + Sync) -> Vec
     data
 }
 
-pub fn par_vec_from<T: Send + Sync>(len: usize, f: impl Fn() -> T + Send + Sync) -> Vec<T> {
+pub fn par_vec_with<T: Send + Sync>(len: usize, f: impl Fn() -> T + Send + Sync) -> Vec<T> {
     let mut data = Vec::with_capacity(len);
     (0..len)
         .into_par_iter()
@@ -141,50 +129,22 @@ pub(crate) fn relationship_map(
 fn relationship_map_sparse(
     G: &Graph,
     U: NodeSubset,
-    mut degrees: Vec<usize>,
+    degrees: Vec<usize>,
     F: impl Fn(usize, usize) -> bool + Send + Sync,
     C: impl Fn(usize) -> bool + Send + Sync,
 ) -> NodeSubset {
-    let subset_size = U.len();
-
     // TODO: parallel
-    let out_rel_count = degrees
-        .par_iter_mut()
-        .fold_with(0_usize, |sum, degree| {
-            *degree += sum;
-            *degree
-        })
-        .sum::<usize>();
-    let offsets = degrees;
-
-    // TODO: we could technically collect into the final
-    // let mut out_rels = Vec::with_capacity(out_rel_count);
-    let subset_nodes = U.nodes();
-
-    // subset_nodes
-    //     .par_iter()
-    //     .zip(offsets.into_par_iter())
-    //     .for_each(|(&node_id, offset)| {
-
-    //         G.out(node_id)
-    //             .par_iter()
-    //             .enumerate()
-    //             .for_each(op)
-
-    //     });
+    let out_rel_count = degrees.into_par_iter().sum::<usize>();
 
     // TODO: replace with atomic usize and lock-free writes
     let out_rels = Arc::new(Mutex::new(Vec::<usize>::with_capacity(out_rel_count)));
 
-    subset_nodes
+    U.nodes()
         .par_iter()
-        // .zip(offsets.into_par_iter())
         .for_each_with(Arc::clone(&out_rels), |out, &node_id| {
-            // let source = node_id.clone();
             // TODO: parallel if d > 1000
             G.out(node_id)
                 .par_iter()
-                // .enumerate()
                 .filter(|&&target| C(target) && F(node_id, target))
                 .for_each(|&target| {
                     let mut out = out.lock().unwrap();
@@ -225,11 +185,7 @@ fn relationship_map_dense(
 }
 
 #[allow(non_snake_case)]
-pub(crate) fn node_map(
-    G: &Graph,
-    U: NodeSubset,
-    F: impl Fn(usize) -> bool + Send + Sync,
-) -> NodeSubset {
+pub(crate) fn node_map(U: NodeSubset, F: impl Fn(usize) -> bool + Send + Sync) -> NodeSubset {
     let node_count = U.node_count();
     let subset_count = U.non_zeroes_count();
 
@@ -257,21 +213,3 @@ pub(crate) fn node_map(
         NodeSubset::sparse_counted(node_count, write_index, sparse)
     }
 }
-
-macro_rules! node_map_impl {
-    ($name:ident: $node_map:ty) => {
-        #[allow(non_snake_case)]
-        fn $name(G: &Graph, U: &$node_map, mut F: impl FnMut(usize) -> bool) -> $node_map {
-            let mut result = <$node_map>::empty(G.node_count());
-            for node in U.iter() {
-                if F(node) {
-                    result.add(node);
-                }
-            }
-            result
-        }
-    };
-}
-
-node_map_impl!(node_map_sparse: SparseNodeSet);
-node_map_impl!(node_map_dense: DenseNodeSet);
