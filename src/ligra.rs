@@ -1,6 +1,9 @@
 use super::*;
 use rayon::prelude::*;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 #[path = "node_set.rs"]
 mod node_set;
@@ -162,26 +165,29 @@ fn relationship_map_sparse(
 fn relationship_map_dense(
     G: &Graph,
     U: NodeSubset,
-    mut F: impl FnMut(usize, usize) -> bool,
-    C: impl Fn(usize) -> bool,
+    F: impl Fn(usize, usize) -> bool + Send + Sync,
+    C: impl Fn(usize) -> bool + Send + Sync,
 ) -> NodeSubset {
-    let mut result = DenseNodeSet::empty(G.node_count());
-    for target in 0..G.node_count() {
+    let node_count = G.node_count();
+
+    let next = par_vec_with(node_count, AtomicBool::default);
+
+    (0..node_count).into_par_iter().for_each(|target| {
         if C(target) {
             for &source in G.inc(target) {
                 if U.contains(source) && F(source, target) {
-                    result.add(target);
+                    next[source].store(true, Ordering::SeqCst);
                 }
                 if !C(target) {
                     break;
                 }
             }
         }
-    }
+    });
 
-    result;
+    let next = unsafe { std::mem::transmute::<Vec<AtomicBool>, Vec<bool>>(next) };
 
-    todo!()
+    NodeSubset::dense(node_count, next)
 }
 
 #[allow(non_snake_case)]
