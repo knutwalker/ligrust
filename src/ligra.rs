@@ -1,6 +1,7 @@
 use super::*;
 use downcast_rs::{impl_downcast, Downcast};
 use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
 
 #[path = "node_set.rs"]
 mod node_set;
@@ -95,6 +96,21 @@ impl NodeSet for DenseNodeSet {
     }
 }
 
+pub fn par_vec<T: Send>(len: usize, f: impl Fn(usize) -> T + Send + Sync) -> Vec<T> {
+    let mut data = Vec::with_capacity(len);
+    (0..len).into_par_iter().map(f).collect_into_vec(&mut data);
+    data
+}
+
+pub fn par_vec_from<T: Send + Sync>(len: usize, f: impl Fn() -> T + Send + Sync) -> Vec<T> {
+    let mut data = Vec::with_capacity(len);
+    (0..len)
+        .into_par_iter()
+        .map(|_| f())
+        .collect_into_vec(&mut data);
+    data
+}
+
 #[allow(non_snake_case)]
 pub(crate) fn relationship_map(
     G: &Graph,
@@ -103,17 +119,13 @@ pub(crate) fn relationship_map(
     C: impl Fn(usize) -> bool + Send + Sync,
 ) -> NodeSubset {
     let subset_size = U.len(); // m
-    let mut degrees = Vec::with_capacity(subset_size);
 
     // TODO: dense iter implementation
     U.to_sparse();
-    (0..subset_size)
-        .into_par_iter()
-        .map(|i| {
-            let node_id = U.node(i);
-            G.out_degree(node_id)
-        })
-        .collect_into_vec(&mut degrees);
+    let degrees = par_vec(subset_size, |i| {
+        let node_id = U.node(i);
+        G.out_degree(node_id)
+    });
 
     let out_degrees = degrees.par_iter().sum::<usize>();
 
@@ -129,7 +141,7 @@ pub(crate) fn relationship_map(
 fn relationship_map_sparse(
     G: &Graph,
     U: NodeSubset,
-    degrees: Vec<usize>,
+    mut degrees: Vec<usize>,
     F: impl Fn(usize, usize) -> bool + Send + Sync,
     C: impl Fn(usize) -> bool + Send + Sync,
 ) -> NodeSubset {
@@ -147,27 +159,43 @@ fn relationship_map_sparse(
 
     // TODO: we could technically collect into the final
     // let mut out_rels = Vec::with_capacity(out_rel_count);
-    let out_rels = U
-        .nodes()
-        .par_iter()
-        .zip(offsets.into_par_iter())
-        .flat_map(|(node_id, offset)| {
-            let source = *node_id;
-            // TODO: parallel if d > 1000
-            G.out(source)
-                .par_iter()
-                .enumerate()
-                .filter_map(|(j, &target)| {
-                    if C(target) && F(source, target) {
-                        Some(target)
-                    } else {
-                        None
-                    }
-                })
-        })
-        .collect::<Vec<_>>();
+    let subset_nodes = U.nodes();
 
-    NodeSubset::sparse(U.node_count(), out_rels)
+    // subset_nodes
+    //     .par_iter()
+    //     .zip(offsets.into_par_iter())
+    //     .for_each(|(&node_id, offset)| {
+
+    //         G.out(node_id)
+    //             .par_iter()
+    //             .enumerate()
+    //             .for_each(op)
+
+    //     });
+
+    // TODO: replace with atomic usize and lock-free writes
+    let out_rels = Arc::new(Mutex::new(Vec::<usize>::with_capacity(out_rel_count)));
+
+    subset_nodes
+        .par_iter()
+        // .zip(offsets.into_par_iter())
+        .for_each_with(Arc::clone(&out_rels), |out, &node_id| {
+            // let source = node_id.clone();
+            // TODO: parallel if d > 1000
+            G.out(node_id)
+                .par_iter()
+                // .enumerate()
+                .filter(|&&target| C(target) && F(node_id, target))
+                .for_each(|&target| {
+                    let mut out = out.lock().unwrap();
+                    out.push(target);
+                })
+        });
+
+    NodeSubset::sparse(
+        U.node_count(),
+        Arc::try_unwrap(out_rels).unwrap().into_inner().unwrap(),
+    )
 }
 
 #[allow(non_snake_case)]
@@ -199,15 +227,34 @@ fn relationship_map_dense(
 #[allow(non_snake_case)]
 pub(crate) fn node_map(
     G: &Graph,
-    U: &dyn NodeSet,
-    F: impl FnMut(usize) -> bool,
-) -> Box<dyn NodeSet> {
-    if let Some(sparse) = U.downcast_ref::<SparseNodeSet>() {
-        Box::new(node_map_sparse(G, sparse, F))
-    } else if let Some(dense) = U.downcast_ref::<DenseNodeSet>() {
-        Box::new(node_map_dense(G, dense, F))
+    U: NodeSubset,
+    F: impl Fn(usize) -> bool + Send + Sync,
+) -> NodeSubset {
+    let node_count = U.node_count();
+    let subset_count = U.non_zeroes_count();
+
+    if U.is_dense() {
+        let dense = par_vec(node_count, F);
+        NodeSubset::dense(node_count, dense)
     } else {
-        unreachable!("there is a new node set in town")
+        let mut sparse = par_vec(
+            subset_count,
+            |node_id| if F(node_id) { node_id } else { usize::MAX },
+        );
+
+        let mut write_index = 0;
+        for read_index in 0..subset_count {
+            let value = sparse[read_index];
+            if value != usize::MAX {
+                // if write_index < read_index {
+                sparse[write_index] = value;
+                // }
+                write_index += 1;
+            }
+        }
+
+        sparse.truncate(write_index);
+        NodeSubset::sparse_counted(node_count, write_index, sparse)
     }
 }
 

@@ -330,46 +330,60 @@ pub(crate) mod ligra;
 
 mod cc {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CC {
-        ids: Vec<usize>,
-        prev_ids: Vec<usize>,
+        ids: Vec<AtomicUsize>,
+        prev_ids: Vec<AtomicUsize>,
     }
 
     impl CC {
         fn new(node_count: usize) -> Self {
             Self {
-                ids: (0..node_count).collect(),
-                prev_ids: vec![0; node_count],
+                ids: ligra::par_vec(node_count, AtomicUsize::new),
+                prev_ids: ligra::par_vec(node_count, |_| AtomicUsize::new(0)),
             }
         }
 
-        fn update(&mut self, source: usize, target: usize) -> bool {
-            let original_id = self.ids[target];
-            if self.ids[source] < original_id {
-                self.ids[target] = self.ids[source];
-                original_id == self.prev_ids[target]
-            } else {
-                false
-            }
+        fn update(&self, source: usize, target: usize) -> bool {
+            let atom = &self.ids[target];
+            let original_id = atom.load(Ordering::SeqCst);
+
+            Self::write_min(atom, self.ids[source].load(Ordering::SeqCst))
+                && original_id == self.prev_ids[target].load(Ordering::SeqCst)
         }
 
-        fn copy(&mut self, node: usize) -> bool {
-            self.prev_ids[node] = self.ids[node];
+        fn copy(&self, node: usize) -> bool {
+            self.prev_ids[node].store(self.ids[node].load(Ordering::SeqCst), Ordering::SeqCst);
             true
+        }
+
+        fn write_min(atom: &AtomicUsize, value: usize) -> bool {
+            loop {
+                let current = atom.load(Ordering::SeqCst);
+                if value < current {
+                    if atom
+                        .compare_exchange_weak(current, value, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                } else {
+                    return false;
+                }
+            }
         }
     }
 
     #[allow(non_snake_case)]
-    pub(crate) fn cc(G: Graph) -> Vec<usize> {
-        let mut cc = CC::new(G.node_count());
+    pub(crate) fn cc(G: Graph) -> Vec<AtomicUsize> {
+        let cc = CC::new(G.node_count());
 
-        let frontier = ligra::DenseNodeSet::full(G.node_count());
-        let mut frontier: Box<dyn ligra::NodeSet> = Box::new(frontier);
+        let mut frontier = ligra::NodeSubset::full(G.node_count());
 
         while frontier.len() != 0 {
-            frontier = ligra::node_map(&G, &*frontier, |node| cc.copy(node));
-            frontier = ligra::relationship_map(&G, &*frontier, |s, t| cc.update(s, t), |_| true);
+            frontier = ligra::node_map(&G, frontier, |node| cc.copy(node));
+            frontier = ligra::relationship_map(&G, frontier, |s, t| cc.update(s, t), |_| true);
         }
 
         cc.ids
@@ -378,7 +392,6 @@ mod cc {
 
 mod bfs {
     use super::*;
-    use crate::ligra::NodeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct BFS {
@@ -409,15 +422,12 @@ mod bfs {
         let mut bfs = BFS::new(G.node_count());
         bfs.parents[root] = AtomicUsize::new(root);
 
-        let mut frontier = ligra::SparseNodeSet::empty(G.node_count());
-        frontier.add(root);
-
-        let mut frontier: Box<dyn ligra::NodeSet> = Box::new(frontier);
+        let mut frontier = ligra::NodeSubset::single(G.node_count(), root);
 
         while frontier.len() != 0 {
             frontier = ligra::relationship_map(
                 &G,
-                &*frontier,
+                frontier,
                 |s, t| bfs.update(s, t),
                 |node| bfs.cond(node),
             );

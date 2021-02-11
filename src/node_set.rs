@@ -1,5 +1,6 @@
 #![allow(unused)]
 use super::*;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 pub(crate) struct NodeSubset {
     node_count: usize,
@@ -31,6 +32,17 @@ impl NodeSubset {
             sparse: None,
             is_dense: false,
         }
+    }
+
+    pub(crate) fn single(node_count: usize, element: usize) -> Self {
+        let mut sparse = vec![element];
+        Self::sparse_counted(node_count, 1, sparse)
+    }
+
+    pub(crate) fn full(node_count: usize) -> Self {
+        let mut dense = Vec::with_capacity(node_count);
+        rayon::iter::repeatn(true, node_count).collect_into_vec(&mut dense);
+        Self::dense_counted(node_count, node_count, dense)
     }
 
     pub(crate) fn sparse_counted(
