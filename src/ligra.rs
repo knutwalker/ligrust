@@ -134,6 +134,37 @@ pub(crate) fn relationship_map(
 }
 
 #[allow(non_snake_case)]
+#[cfg(feature = "sparse_atomic_pack")]
+fn relationship_map_sparse(
+    G: &Graph,
+    U: NodeSubset,
+    degrees: Vec<usize>,
+    F: impl Fn(usize, usize) -> bool + Send + Sync,
+    C: impl Fn(usize) -> bool + Send + Sync,
+) -> NodeSubset {
+    let out_rel_count = degrees.into_par_iter().sum::<usize>();
+    let out_rels = par_vec_with(out_rel_count, || AtomicUsize::new(usize::MAX));
+
+    let write_idx = AtomicUsize::default();
+    U.nodes().par_iter().for_each(|&source| {
+        G.out(source).par_iter().for_each(|&target| {
+            if C(target) && F(source, target) {
+                let idx = write_idx.fetch_add(1, Ordering::SeqCst);
+                out_rels[idx].store(target, Ordering::SeqCst);
+            }
+        })
+    });
+
+    let mut out_rels = unsafe { std::mem::transmute::<Vec<AtomicUsize>, Vec<usize>>(out_rels) };
+    let write_idx = write_idx.load(Ordering::SeqCst);
+
+    out_rels.truncate(write_idx);
+
+    NodeSubset::sparse(U.node_count(), out_rels)
+}
+
+#[allow(non_snake_case)]
+#[cfg(not(feature = "sparse_atomic_pack"))]
 fn relationship_map_sparse(
     G: &Graph,
     U: NodeSubset,
