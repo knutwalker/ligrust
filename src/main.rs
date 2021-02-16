@@ -54,13 +54,26 @@ impl Opts {
                 Ok(Self { command })
             }
             Some(c) if c.as_str() == "bfs" => {
+                let source: usize = args.value_from_str(["-s", "--source"])?;
                 let input = args.free_from_os_str(as_path_buf)?;
-                let source = args.free_from_str::<usize>()?;
                 let free = args.finish();
                 if !free.is_empty() {
                     bail!("Unexpected arguments: {:?}", free);
                 }
                 let command = Command::BFS(RunBFS { input, source });
+                Ok(Self { command })
+            }
+            Some(c) if c.as_str() == "prd" => {
+                let max_iterations: usize = args.value_from_str(["-i", "--iterations"])?;
+                let input = args.free_from_os_str(as_path_buf)?;
+                let free = args.finish();
+                if !free.is_empty() {
+                    bail!("Unexpected arguments: {:?}", free);
+                }
+                let command = Command::PageRankDelta(RunPageRankDelta {
+                    input,
+                    max_iterations,
+                });
                 Ok(Self { command })
             }
             _ => {
@@ -74,6 +87,7 @@ enum Command {
     Parse(ParseInput),
     CC(RunCC),
     BFS(RunBFS),
+    PageRankDelta(RunPageRankDelta),
 }
 
 /// Parses an input file and dump a binary representation of the graph
@@ -97,6 +111,14 @@ struct RunBFS {
     input: PathBuf,
     /// source node to run BFS from
     source: usize,
+}
+
+/// Run PageRankDelta on a parsed input
+struct RunPageRankDelta {
+    /// input file in "AdjacencyGraph" format
+    input: PathBuf,
+    /// maximum number of iterations to run
+    max_iterations: usize,
 }
 
 #[derive(Debug)]
@@ -437,6 +459,134 @@ mod bfs {
     }
 }
 
+mod pagerank_delta {
+
+    use super::*;
+    use atomic_float::AtomicF64;
+    use ligra::par_vec_with;
+    use std::sync::atomic::Ordering;
+
+    const DAMPING_FACTOR: f64 = 0.85;
+    const TOLERANCE: f64 = 1E-7;
+    const DELTA_THRESHOLD: f64 = 1E-2;
+    const ALPHA: f64 = 1.0 - DAMPING_FACTOR;
+
+    struct PageRankDelta {
+        deltas: Vec<AtomicF64>,
+        neighbors_rank: Vec<AtomicF64>,
+        page_rank: Vec<AtomicF64>,
+        one_over_n: f64,
+        sum_of_delta: AtomicF64,
+    }
+
+    impl PageRankDelta {
+        fn new(node_count: usize) -> Self {
+            let initial_value = 1.0 / node_count as f64;
+
+            let deltas = par_vec_with(node_count, || AtomicF64::new(initial_value));
+            let neighbors_rank = par_vec_with(node_count, AtomicF64::default);
+            let page_rank = par_vec_with(node_count, AtomicF64::default);
+
+            let one_over_n = 1.0 / node_count as f64;
+
+            PageRankDelta {
+                deltas,
+                neighbors_rank,
+                page_rank,
+                one_over_n,
+                sum_of_delta: AtomicF64::default(),
+            }
+        }
+
+        fn sum_of_delta_and_reset(&self) -> f64 {
+            self.sum_of_delta.swap(0.0, Ordering::SeqCst)
+        }
+
+        fn update_node_first_round(&self, node_id: usize) -> bool {
+            // TODO ALPHA / node_count for normalization
+            let mut delta =
+                self.neighbors_rank[node_id].swap(0.0, Ordering::SeqCst) * DAMPING_FACTOR + ALPHA;
+            let current_rank = self.page_rank[node_id].fetch_add(delta, Ordering::SeqCst) + delta;
+            delta -= self.one_over_n;
+            self.deltas[node_id].store(delta, Ordering::SeqCst);
+            self.sum_of_delta.fetch_add(delta, Ordering::SeqCst);
+            delta.abs() > (current_rank + DELTA_THRESHOLD)
+        }
+
+        fn update_node(&self, node_id: usize) -> bool {
+            let delta = self.neighbors_rank[node_id].swap(0.0, Ordering::SeqCst) * DAMPING_FACTOR;
+            self.deltas[node_id].store(delta, Ordering::SeqCst);
+            self.sum_of_delta.fetch_add(delta, Ordering::SeqCst);
+
+            let current_rank = self.page_rank[node_id].load(Ordering::SeqCst);
+
+            if current_rank.abs() > (current_rank * DELTA_THRESHOLD) {
+                self.page_rank[node_id].store(current_rank + delta, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        }
+
+        fn update_relationship(&self, G: &Graph, source: usize, target: usize) -> bool {
+            let delta = self.deltas[source].load(Ordering::SeqCst) / G.out_degree(source) as f64;
+            let rank = self.neighbors_rank[target].fetch_add(delta, Ordering::SeqCst);
+
+            rank == 0.0
+        }
+    }
+
+    pub(crate) fn page_rank_delta(G: Graph, mut max_iterations: usize) -> Vec<AtomicF64> {
+        let page_rank = PageRankDelta::new(G.node_count());
+
+        let mut frontier = ligra::NodeSubset::full(G.node_count());
+
+        // first iteration
+        ligra::relationship_map(
+            &G,
+            frontier,
+            |s, t| page_rank.update_relationship(&G, s, t),
+            |_| true,
+        );
+
+        frontier = ligra::node_map(ligra::NodeSubset::full(G.node_count()), |node_id| {
+            page_rank.update_node_first_round(node_id)
+        });
+
+        let error = page_rank.sum_of_delta_and_reset();
+
+        if error < TOLERANCE {
+            return page_rank.page_rank;
+        }
+
+        max_iterations -= 1;
+
+        // remaining iterations
+        while max_iterations > 0 {
+            ligra::relationship_map(
+                &G,
+                frontier,
+                |s, t| page_rank.update_relationship(&G, s, t),
+                |_| true,
+            );
+
+            frontier = ligra::node_map(ligra::NodeSubset::full(G.node_count()), |node_id| {
+                page_rank.update_node(node_id)
+            });
+
+            let error = page_rank.sum_of_delta_and_reset();
+
+            if error < TOLERANCE {
+                break;
+            }
+
+            max_iterations -= 1;
+        }
+
+        page_rank.page_rank
+    }
+}
+
 fn parse(input: PathBuf, output: PathBuf) -> Result<()> {
     let start = Instant::now();
     let file = File::open(input)?;
@@ -565,11 +715,38 @@ fn run_bfs(input: PathBuf, source: usize) -> Result<()> {
     println!("building full graph: {:?}", start.elapsed());
     let start = Instant::now();
 
-    let cc = bfs::bfs(graph, source);
+    let parents = bfs::bfs(graph, source);
 
-    println!("{:?}", cc);
+    println!("{:?}", parents);
 
-    println!("bfs done with {} nodes: {:?}", cc.len(), start.elapsed());
+    println!(
+        "bfs done with {} nodes: {:?}",
+        parents.len(),
+        start.elapsed()
+    );
+
+    Ok(())
+}
+
+fn run_page_rank_delta(input: PathBuf, max_iterations: usize) -> Result<()> {
+    let start = Instant::now();
+    let file = File::open(input)?;
+
+    println!("preparing input: {:?}", start.elapsed());
+    let start = Instant::now();
+
+    let graph = load(file)?;
+
+    println!("building full graph: {:?}", start.elapsed());
+    let start = Instant::now();
+
+    let pr = pagerank_delta::page_rank_delta(graph, max_iterations);
+
+    println!(
+        "page rank done with {} nodes: {:?}",
+        pr.len(),
+        start.elapsed()
+    );
 
     Ok(())
 }
@@ -580,5 +757,6 @@ fn main() -> Result<()> {
         Command::Parse(opts) => parse(opts.input, opts.output),
         Command::CC(opts) => run_cc(opts.input),
         Command::BFS(opts) => run_bfs(opts.input, opts.source),
+        Command::PageRankDelta(opts) => run_page_rank_delta(opts.input, opts.max_iterations),
     }
 }

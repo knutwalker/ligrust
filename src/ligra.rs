@@ -99,6 +99,15 @@ pub fn par_vec_with<T: Send + Sync>(len: usize, f: impl Fn() -> T + Send + Sync)
     data
 }
 
+pub fn par_vec_copy<T: Clone + Send + Sync>(len: usize, initial_value: T) -> Vec<T> {
+    let mut data = Vec::with_capacity(len);
+    (0..len)
+        .into_par_iter()
+        .map(|_| initial_value.clone())
+        .collect_into_vec(&mut data);
+    data
+}
+
 #[allow(non_snake_case)]
 pub(crate) fn relationship_map(
     G: &Graph,
