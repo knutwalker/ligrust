@@ -1,9 +1,6 @@
 use super::*;
 use rayon::prelude::*;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[path = "node_set.rs"]
 mod node_set;
@@ -132,33 +129,54 @@ pub(crate) fn relationship_map(
 fn relationship_map_sparse(
     G: &Graph,
     U: NodeSubset,
-    degrees: Vec<usize>,
+    mut degrees: Vec<usize>,
     F: impl Fn(usize, usize) -> bool + Send + Sync,
     C: impl Fn(usize) -> bool + Send + Sync,
 ) -> NodeSubset {
-    // TODO: parallel
-    let out_rel_count = degrees.into_par_iter().sum::<usize>();
+    // before [1 3 3  7]
+    // after  [1 4 7 14]
+    let out_rel_count = degrees
+        .par_iter_mut()
+        .fold_with(0_usize, |sum, degree| {
+            *degree += sum;
+            *degree
+        })
+        .sum::<usize>();
 
-    // TODO: replace with atomic usize and lock-free writes
-    let out_rels = Arc::new(Mutex::new(Vec::<usize>::with_capacity(out_rel_count)));
+    let offsets = degrees;
+
+    let out_rels = par_vec_with(out_rel_count, || AtomicUsize::new(usize::MAX));
 
     U.nodes()
         .par_iter()
-        .for_each_with(Arc::clone(&out_rels), |out, &node_id| {
-            // TODO: parallel if d > 1000
-            G.out(node_id)
+        .zip(offsets.into_par_iter())
+        .for_each(|(node_id, offset)| {
+            let source = *node_id;
+            G.out(source)
                 .par_iter()
-                .filter(|&&target| C(target) && F(node_id, target))
-                .for_each(|&target| {
-                    let mut out = out.lock().unwrap();
-                    out.push(target);
+                .enumerate()
+                .for_each(|(j, &target)| {
+                    if C(target) && F(source, target) {
+                        out_rels[offset + j].store(target, Ordering::SeqCst)
+                    }
                 })
         });
 
-    NodeSubset::sparse(
-        U.node_count(),
-        Arc::try_unwrap(out_rels).unwrap().into_inner().unwrap(),
-    )
+    let mut out_rels = unsafe { std::mem::transmute::<Vec<AtomicUsize>, Vec<usize>>(out_rels) };
+    let mut write_idx = 0;
+
+    // pack non-max values together
+    for i in 0..out_rels.len() {
+        let target = out_rels[i];
+        if target != usize::MAX {
+            out_rels[write_idx] = target;
+            write_idx += 1;
+        }
+    }
+
+    out_rels.truncate(write_idx);
+
+    NodeSubset::sparse(U.node_count(), out_rels)
 }
 
 #[allow(non_snake_case)]
