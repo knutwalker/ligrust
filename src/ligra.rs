@@ -108,12 +108,20 @@ pub(crate) fn relationship_map(
 ) -> NodeSubset {
     let subset_size = U.len(); // m
 
-    // TODO: dense iter implementation
-    U.to_sparse();
-    let degrees = par_vec(subset_size, |i| {
-        let node_id = U.node(i);
-        G.out_degree(node_id)
-    });
+    let degrees = if U.is_dense() {
+        par_vec(U.node_count(), |node_id| {
+            if U.contains(node_id) {
+                G.out_degree(node_id)
+            } else {
+                0
+            }
+        })
+    } else {
+        par_vec(subset_size, |i| {
+            let node_id = U.node(i);
+            G.out_degree(node_id)
+        })
+    };
 
     let out_degrees = degrees.par_iter().sum::<usize>();
 
