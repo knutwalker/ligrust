@@ -25,6 +25,7 @@ rayon = "1.5.0"
 # test-case = "1.1.0"
 
 [features]
+default = ["mapped_graph"]
 weighted = []
 sparse_atomic_pack = []
 mapped_graph = ["memmap"]
