@@ -1,8 +1,7 @@
-#![allow(unused)]
-use super::*;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+#![allow(dead_code)]
+use rayon::iter::IndexedParallelIterator;
 
-pub(crate) struct NodeSubset {
+pub struct NodeSubset {
     node_count: usize,
     subset_count: usize,
     dense: Option<Box<[bool]>>,
@@ -24,7 +23,7 @@ impl Default for NodeSubset {
 
 /// Constructors
 impl NodeSubset {
-    pub(crate) fn empty(node_count: usize) -> Self {
+    pub fn empty(node_count: usize) -> Self {
         Self {
             node_count,
             subset_count: 0,
@@ -34,18 +33,18 @@ impl NodeSubset {
         }
     }
 
-    pub(crate) fn single(node_count: usize, element: usize) -> Self {
-        let mut sparse = vec![element];
+    pub fn single(node_count: usize, element: usize) -> Self {
+        let sparse = vec![element];
         Self::sparse_counted(node_count, 1, sparse)
     }
 
-    pub(crate) fn full(node_count: usize) -> Self {
+    pub fn full(node_count: usize) -> Self {
         let mut dense = Vec::with_capacity(node_count);
         rayon::iter::repeatn(true, node_count).collect_into_vec(&mut dense);
         Self::dense_counted(node_count, node_count, dense)
     }
 
-    pub(crate) fn sparse_counted(
+    pub fn sparse_counted(
         node_count: usize,
         rel_count: usize,
         sparse: impl Into<Box<[usize]>>,
@@ -59,12 +58,12 @@ impl NodeSubset {
         }
     }
 
-    pub(crate) fn sparse(node_count: usize, sparse: impl Into<Box<[usize]>>) -> Self {
+    pub fn sparse(node_count: usize, sparse: impl Into<Box<[usize]>>) -> Self {
         let sparse = sparse.into();
         Self::sparse_counted(node_count, sparse.len(), sparse)
     }
 
-    pub(crate) fn dense_counted(
+    pub fn dense_counted(
         node_count: usize,
         rel_count: usize,
         dense: impl Into<Box<[bool]>>,
@@ -78,7 +77,7 @@ impl NodeSubset {
         }
     }
 
-    pub(crate) fn dense(node_count: usize, dense: impl Into<Box<[bool]>>) -> Self {
+    pub fn dense(node_count: usize, dense: impl Into<Box<[bool]>>) -> Self {
         let dense = dense.into();
         let rel_count = dense.iter().filter(|d| **d).count();
         Self::dense_counted(node_count, rel_count, dense)
@@ -87,46 +86,46 @@ impl NodeSubset {
 
 /// Common stuff
 impl NodeSubset {
-    pub(crate) fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         self.subset_count
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.subset_count
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.subset_count == 0
     }
 
-    pub(crate) fn is_dense(&self) -> bool {
+    pub fn is_dense(&self) -> bool {
         self.is_dense
     }
 
-    pub(crate) fn node_count(&self) -> usize {
+    pub fn node_count(&self) -> usize {
         self.node_count
     }
 
-    pub(crate) fn row_count(&self) -> usize {
+    pub fn row_count(&self) -> usize {
         self.node_count
     }
 
-    pub(crate) fn non_zeroes_count(&self) -> usize {
+    pub fn non_zeroes_count(&self) -> usize {
         self.subset_count
     }
 }
 
 /// Sparse NodeSet
 impl NodeSubset {
-    pub(crate) fn node(&self, index: usize) -> usize {
+    pub fn node(&self, index: usize) -> usize {
         self.sparse.as_ref().expect("sparse")[index]
     }
 
-    pub(crate) fn nodes(&self) -> &[usize] {
+    pub fn nodes(&self) -> &[usize] {
         self.sparse.as_deref().unwrap_or_default()
     }
 
-    pub(crate) fn to_dense(&mut self) {
+    pub fn to_dense(&mut self) {
         if self.dense.is_none() {
             let mut dense = vec![false; self.node_count];
             if let Some(sparse) = self.sparse.take() {
@@ -174,11 +173,11 @@ impl<'a> IntoIterator for &'a NodeSubset {
 
 /// Dense NodeSet
 impl NodeSubset {
-    pub(crate) fn contains(&self, value: usize) -> bool {
+    pub fn contains(&self, value: usize) -> bool {
         self.dense.as_ref().expect("dense")[value]
     }
 
-    pub(crate) fn to_sparse(&mut self) {
+    pub fn to_sparse(&mut self) {
         if self.sparse.is_none() && self.subset_count > 0 {
             let mut sparse = Vec::with_capacity(self.subset_count);
             if let Some(dense) = self.dense.take() {
