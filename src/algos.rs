@@ -1,5 +1,5 @@
-use crate::{graph::Graph, Result};
-use std::{fs::File, path::PathBuf, time::Instant};
+use crate::{graph::load_graph, Result};
+use std::{path::PathBuf, time::Instant};
 
 pub fn run_cc(input: PathBuf) -> Result<()> {
     let graph = load_graph(input)?;
@@ -43,19 +43,6 @@ pub fn run_page_rank_delta(input: PathBuf, max_iterations: usize) -> Result<()> 
     );
 
     Ok(())
-}
-
-fn load_graph(input: PathBuf) -> Result<Graph> {
-    let start = Instant::now();
-    let file = File::open(input)?;
-
-    println!("preparing input: {:?}", start.elapsed());
-    let start = Instant::now();
-
-    let graph = crate::graph::load(file)?;
-
-    println!("building full graph: {:?}", start.elapsed());
-    Ok(graph)
 }
 
 mod cc {
@@ -120,15 +107,14 @@ mod cc {
         }
     }
 
-    #[allow(non_snake_case)]
-    pub(crate) fn cc(G: Graph) -> Vec<AtomicUsize> {
-        let cc = CC::new(G.node_count());
+    pub(crate) fn cc<G: Graph + Sync>(graph: G) -> Vec<AtomicUsize> {
+        let cc = CC::new(graph.node_count());
 
-        let mut frontier = ligra::NodeSubset::full(G.node_count());
+        let mut frontier = ligra::NodeSubset::full(graph.node_count());
 
         while frontier.len() != 0 {
             frontier = ligra::node_map(&frontier, &cc);
-            frontier = ligra::relationship_map(&G, frontier, &cc);
+            frontier = ligra::relationship_map(&graph, frontier, &cc);
         }
 
         cc.ids
@@ -167,14 +153,13 @@ mod bfs {
         }
     }
 
-    #[allow(non_snake_case)]
-    pub(crate) fn bfs(G: Graph, root: usize) -> Vec<AtomicUsize> {
-        let mut bfs = BFS::new(G.node_count());
+    pub(crate) fn bfs<G: Graph + Sync>(graph: G, root: usize) -> Vec<AtomicUsize> {
+        let mut bfs = BFS::new(graph.node_count());
         bfs.parents[root] = AtomicUsize::new(root);
 
-        let mut frontier = ligra::NodeSubset::single(G.node_count(), root);
+        let mut frontier = ligra::NodeSubset::single(graph.node_count(), root);
         while frontier.len() != 0 {
-            frontier = ligra::relationship_map(&G, frontier, &bfs);
+            frontier = ligra::relationship_map(&graph, frontier, &bfs);
         }
 
         bfs.parents
@@ -195,8 +180,8 @@ mod pagerank_delta {
     const DELTA_THRESHOLD: f64 = 1E-2;
     const ALPHA: f64 = 1.0 - DAMPING_FACTOR;
 
-    struct PageRankDelta<'g> {
-        graph: &'g Graph,
+    struct PageRankDelta<'g, G> {
+        graph: &'g G,
         deltas: Vec<AtomicF64>,
         neighbors_rank: Vec<AtomicF64>,
         page_rank: Vec<AtomicF64>,
@@ -204,9 +189,9 @@ mod pagerank_delta {
         sum_of_delta: AtomicF64,
     }
 
-    struct FirstRound<'a, 'g>(&'a PageRankDelta<'g>);
+    struct FirstRound<'a, 'g, G>(&'a PageRankDelta<'g, G>);
 
-    impl<'a, 'g> NodeMapper for FirstRound<'a, 'g> {
+    impl<'a, 'g, G> NodeMapper for FirstRound<'a, 'g, G> {
         fn update(&self, node: usize) -> bool {
             // TODO ALPHA / node_count for normalization
             let mut delta =
@@ -219,7 +204,7 @@ mod pagerank_delta {
         }
     }
 
-    impl<'g> NodeMapper for PageRankDelta<'g> {
+    impl<'g, G> NodeMapper for PageRankDelta<'g, G> {
         fn update(&self, node: usize) -> bool {
             let delta = self.neighbors_rank[node].swap(0.0, Ordering::SeqCst) * DAMPING_FACTOR;
             self.deltas[node].store(delta, Ordering::SeqCst);
@@ -236,7 +221,7 @@ mod pagerank_delta {
         }
     }
 
-    impl<'g> RelationshipMapper for PageRankDelta<'g> {
+    impl<'g, G: Graph> RelationshipMapper for PageRankDelta<'g, G> {
         fn update(&self, source: usize, target: usize) -> bool {
             let delta =
                 self.deltas[source].load(Ordering::SeqCst) / self.graph.out_degree(source) as f64;
@@ -250,8 +235,8 @@ mod pagerank_delta {
         }
     }
 
-    impl<'g> PageRankDelta<'g> {
-        fn new(graph: &'g Graph) -> Self {
+    impl<'g, G: Graph> PageRankDelta<'g, G> {
+        fn new(graph: &'g G) -> Self {
             let node_count = graph.node_count();
             let initial_value = 1.0 / node_count as f64;
 
@@ -276,15 +261,17 @@ mod pagerank_delta {
         }
     }
 
-    #[allow(non_snake_case)]
-    pub(crate) fn page_rank_delta(G: Graph, mut max_iterations: usize) -> Vec<AtomicF64> {
-        let pr = PageRankDelta::new(&G);
+    pub(crate) fn page_rank_delta<G: Graph + Sync>(
+        graph: G,
+        mut max_iterations: usize,
+    ) -> Vec<AtomicF64> {
+        let pr = PageRankDelta::new(&graph);
 
-        let all_nodes = NodeSubset::full(G.node_count());
-        let mut frontier = NodeSubset::full(G.node_count());
+        let all_nodes = NodeSubset::full(graph.node_count());
+        let mut frontier = NodeSubset::full(graph.node_count());
 
         // first iteration  -- todo: no_output
-        ligra::relationship_map(&G, frontier, &pr);
+        ligra::relationship_map(&graph, frontier, &pr);
         frontier = ligra::node_map(&all_nodes, &FirstRound(&pr));
 
         // remaining iterations
@@ -296,7 +283,7 @@ mod pagerank_delta {
                 break;
             }
 
-            ligra::relationship_map(&G, frontier, &pr);
+            ligra::relationship_map(&graph, frontier, &pr);
             frontier = ligra::node_map(&all_nodes, &pr);
         }
 

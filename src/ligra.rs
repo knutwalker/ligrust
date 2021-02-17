@@ -51,11 +51,11 @@ pub trait RelationshipMapper {
     }
 }
 
-pub fn relationship_map<T: RelationshipMapper + Sync + ?Sized>(
-    graph: &Graph,
-    mut node_subset: NodeSubset,
-    mapper: &T,
-) -> NodeSubset {
+pub fn relationship_map<G, T>(graph: &G, mut node_subset: NodeSubset, mapper: &T) -> NodeSubset
+where
+    G: Graph + Sync + ?Sized,
+    T: RelationshipMapper + Sync + ?Sized,
+{
     let subset_size = node_subset.len(); // m
 
     let degrees = if node_subset.is_dense() {
@@ -84,12 +84,16 @@ pub fn relationship_map<T: RelationshipMapper + Sync + ?Sized>(
 }
 
 #[cfg(feature = "sparse_atomic_pack")]
-fn relationship_map_sparse<T: RelationshipMapper + Sync + ?Sized>(
-    graph: &Graph,
+fn relationship_map_sparse<G, T>(
+    graph: &G,
     node_subset: NodeSubset,
     degrees: Vec<usize>,
     mapper: &T,
-) -> NodeSubset {
+) -> NodeSubset
+where
+    G: Graph + Sync + ?Sized,
+    T: RelationshipMapper + Sync + ?Sized,
+{
     let out_rel_count = degrees.into_par_iter().sum::<usize>();
     let out_rels = par_vec_with(out_rel_count, || AtomicUsize::new(usize::MAX));
 
@@ -112,12 +116,16 @@ fn relationship_map_sparse<T: RelationshipMapper + Sync + ?Sized>(
 }
 
 #[cfg(not(feature = "sparse_atomic_pack"))]
-fn relationship_map_sparse<T: RelationshipMapper + Sync + ?Sized>(
-    graph: &Graph,
+fn relationship_map_sparse<G, T>(
+    graph: &G,
     node_subset: NodeSubset,
     mut degrees: Vec<usize>,
     mapper: &T,
-) -> NodeSubset {
+) -> NodeSubset
+where
+    G: Graph + Sync + ?Sized,
+    T: RelationshipMapper + Sync + ?Sized,
+{
     // before [1 3 3  7]
     // after  [1 4 7 14]
     let out_rel_count = degrees
@@ -166,11 +174,11 @@ fn relationship_map_sparse<T: RelationshipMapper + Sync + ?Sized>(
     NodeSubset::sparse(node_subset.node_count(), out_rels)
 }
 
-fn relationship_map_dense<T: RelationshipMapper + Sync + ?Sized>(
-    graph: &Graph,
-    node_subset: NodeSubset,
-    mapper: &T,
-) -> NodeSubset {
+fn relationship_map_dense<G, T>(graph: &G, node_subset: NodeSubset, mapper: &T) -> NodeSubset
+where
+    G: Graph + Sync + ?Sized,
+    T: RelationshipMapper + Sync + ?Sized,
+{
     let node_count = graph.node_count();
 
     let next = par_vec_with(node_count, AtomicBool::default);

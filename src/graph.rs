@@ -2,6 +2,10 @@ use crate::Result;
 use atoi::FromRadix10;
 use byte_slice_cast::*;
 use linereader::LineReader;
+#[cfg(feature = "mapped_graph")]
+use memmap::Mmap;
+#[cfg(feature = "mapped_graph")]
+use std::convert::TryInto;
 use std::{
     convert::TryFrom,
     fs::File,
@@ -11,40 +15,97 @@ use std::{
     time::Instant,
 };
 
+pub trait Graph {
+    fn node_count(&self) -> usize;
+
+    fn rel_count(&self) -> usize;
+
+    fn out(&self, node: usize) -> &[usize];
+
+    fn inc(&self, node: usize) -> &[usize];
+
+    fn out_degree(&self, node: usize) -> usize;
+
+    fn inc_degree(&self, node: usize) -> usize;
+
+    fn threshold(&self) -> usize {
+        self.rel_count() / 20
+    }
+}
+#[cfg(feature = "mapped_graph")]
 #[derive(Debug)]
-pub struct Graph {
+pub struct MappedGraph {
+    map: Mmap,
+    node_count: usize,
+    rel_count: usize,
+    out_nodes: &'static [Node],
+    out_targets: &'static [usize],
+    in_nodes: &'static [Node],
+    in_targets: &'static [usize],
+}
+
+#[cfg(feature = "mapped_graph")]
+impl Graph for MappedGraph {
+    fn node_count(&self) -> usize {
+        self.node_count
+    }
+
+    fn rel_count(&self) -> usize {
+        self.rel_count
+    }
+
+    fn out(&self, node: usize) -> &[usize] {
+        let node = self.out_nodes[node];
+        let start = node.offset;
+        let end = node.degree + start;
+        &self.out_targets[start..end]
+    }
+
+    fn inc(&self, node: usize) -> &[usize] {
+        let node = self.in_nodes[node];
+        let start = node.offset;
+        let end = node.degree + start;
+        &self.in_targets[start..end]
+    }
+
+    fn out_degree(&self, node: usize) -> usize {
+        self.out_nodes[node].degree
+    }
+
+    fn inc_degree(&self, node: usize) -> usize {
+        self.in_nodes[node].degree
+    }
+}
+
+#[derive(Debug)]
+pub struct AdjacencyGraph {
     out: AdjacencyList,
     inc: AdjacencyList,
 }
 
-impl Graph {
-    pub fn node_count(&self) -> usize {
+impl Graph for AdjacencyGraph {
+    fn node_count(&self) -> usize {
         self.out.node_count()
     }
 
-    pub fn rel_count(&self) -> usize {
+    fn rel_count(&self) -> usize {
         self.out.rel_count()
     }
 
-    pub fn out(&self, node: usize) -> &[usize] {
+    fn out(&self, node: usize) -> &[usize] {
         self.out.rels(node)
     }
 
-    pub fn inc(&self, node: usize) -> &[usize] {
+    fn inc(&self, node: usize) -> &[usize] {
         self.inc.rels(node)
     }
 
-    pub fn out_degree(&self, node: usize) -> usize {
+    fn out_degree(&self, node: usize) -> usize {
         self.out.degree(node)
     }
 
-    #[allow(dead_code)]
-    pub fn inc_degree(&self, node: usize) -> usize {
+    fn inc_degree(&self, node: usize) -> usize {
         self.inc.degree(node)
-    }
-
-    pub fn threshold(&self) -> usize {
-        self.rel_count() / 20
     }
 }
 
@@ -174,10 +235,10 @@ impl From<(Vec<usize>, Vec<usize>)> for AdjacencyList {
     }
 }
 
-impl From<AdjacencyList> for Graph {
+impl From<AdjacencyList> for AdjacencyGraph {
     fn from(out: AdjacencyList) -> Self {
         let inc = out.invert();
-        Graph { out, inc }
+        AdjacencyGraph { out, inc }
     }
 }
 
@@ -251,14 +312,14 @@ pub fn parse(input: PathBuf, output: PathBuf) -> Result<()> {
     println!("parsing input: {:?}", start.elapsed());
     let start = Instant::now();
 
-    let graph = Graph::from(adjacencies);
+    let graph = AdjacencyGraph::from(adjacencies);
 
     println!("building full graph: {:?}", start.elapsed());
 
     dump(graph, output)
 }
 
-pub fn dump(graph: Graph, mut output: impl Write) -> Result<()> {
+pub fn dump(graph: AdjacencyGraph, mut output: impl Write) -> Result<()> {
     let start = Instant::now();
 
     let node_count = graph.node_count();
@@ -266,7 +327,7 @@ pub fn dump(graph: Graph, mut output: impl Write) -> Result<()> {
     let meta = [node_count, rel_count];
     output.write_all(meta.as_byte_slice())?;
 
-    let Graph { out, inc } = graph;
+    let AdjacencyGraph { out, inc } = graph;
 
     let AdjacencyList {
         nodes: out_nodes,
@@ -295,7 +356,67 @@ pub fn dump(graph: Graph, mut output: impl Write) -> Result<()> {
     Ok(())
 }
 
-pub fn load(mut input: impl Read) -> Result<Graph> {
+pub fn load_graph(input: PathBuf) -> Result<impl Graph + Sync> {
+    let start = Instant::now();
+    let file = File::open(input)?;
+
+    println!("preparing input: {:?}", start.elapsed());
+    let start = Instant::now();
+
+    let graph = {
+        #[cfg(feature = "mapped_graph")]
+        {
+            load_map(file)
+        }
+
+        #[cfg(not(feature = "mapped_graph"))]
+        {
+            load(file)
+        }
+    }?;
+
+    println!("building full graph: {:?}", start.elapsed());
+    Ok(graph)
+}
+
+#[cfg(feature = "mapped_graph")]
+pub fn load_map(input: File) -> Result<MappedGraph> {
+    let start = Instant::now();
+    let map = unsafe { Mmap::map(&input)? };
+
+    let (node_count_bytes, rest) = map.split_at(std::mem::size_of::<usize>());
+    let (rel_count_bytes, rest) = rest.split_at(std::mem::size_of::<usize>());
+    let node_count = usize::from_le_bytes(node_count_bytes.try_into().unwrap());
+    let rel_count = usize::from_le_bytes(rel_count_bytes.try_into().unwrap());
+
+    let (out_nodes_bytes, rest) = rest.split_at(node_count * std::mem::size_of::<Node>());
+    let (out_targets_bytes, rest) = rest.split_at(rel_count * std::mem::size_of::<usize>());
+
+    let (in_nodes_bytes, rest) = rest.split_at(node_count * std::mem::size_of::<Node>());
+    let (in_targets_bytes, rest) = rest.split_at(rel_count * std::mem::size_of::<usize>());
+
+    ensure!(rest.is_empty(), "extra data");
+
+    let out_nodes: &'static [Node] = unsafe { std::mem::transmute(out_nodes_bytes) };
+    let out_targets: &'static [usize] = unsafe { std::mem::transmute(out_targets_bytes) };
+
+    let in_nodes: &'static [Node] = unsafe { std::mem::transmute(in_nodes_bytes) };
+    let in_targets: &'static [usize] = unsafe { std::mem::transmute(in_targets_bytes) };
+
+    println!("deserializing graph : {:?}", start.elapsed());
+
+    Ok(MappedGraph {
+        map,
+        node_count,
+        rel_count,
+        out_nodes,
+        out_targets,
+        in_nodes,
+        in_targets,
+    })
+}
+
+pub fn load(mut input: impl Read) -> Result<AdjacencyGraph> {
     let start = Instant::now();
 
     let mut meta = [0_usize; 2];
@@ -332,5 +453,5 @@ pub fn load(mut input: impl Read) -> Result<Graph> {
 
     println!("deserializing graph : {:?}", start.elapsed());
 
-    Ok(Graph { out, inc })
+    Ok(AdjacencyGraph { out, inc })
 }
