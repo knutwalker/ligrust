@@ -113,7 +113,7 @@ mod cc {
         let mut frontier = ligra::NodeSubset::full(graph.node_count());
 
         while frontier.len() != 0 {
-            frontier = ligra::node_map(&frontier, &cc);
+            frontier = ligra::node_filter(&frontier, &cc);
             ligra::relationship_map(&graph, &mut frontier, &cc);
         }
 
@@ -274,9 +274,8 @@ mod pagerank_delta {
         let all_nodes = NodeSubset::full(graph.node_count());
         let mut frontier = NodeSubset::full(graph.node_count());
 
-        // first iteration  -- todo: no_output
         ligra::relationship_map(&graph, &mut frontier, &pr);
-        frontier = ligra::node_map(&all_nodes, &FirstRound(&pr));
+        frontier = ligra::node_filter(&all_nodes, &FirstRound(&pr));
 
         // remaining iterations
         loop {
@@ -288,7 +287,7 @@ mod pagerank_delta {
             }
 
             ligra::relationship_map(&graph, &mut frontier, &pr);
-            frontier = ligra::node_map(&all_nodes, &pr);
+            frontier = ligra::node_filter(&all_nodes, &pr);
         }
 
         pr.page_rank

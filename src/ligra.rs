@@ -237,21 +237,47 @@ pub trait NodeMapper {
     }
 }
 
-pub fn node_map<T: NodeMapper + Sync + ?Sized>(node_subset: &NodeSubset, mapper: &T) -> NodeSubset {
+pub fn node_map<T: NodeMapper + Sync + ?Sized>(node_subset: &NodeSubset, mapper: &T) {
+    let node_count = node_subset.node_count();
+
+    if node_subset.is_dense() {
+        (0..node_count).into_par_iter().for_each(|node| {
+            if node_subset.contains(node) {
+                mapper.update(node);
+            }
+        });
+    } else {
+        node_subset.nodes().par_iter().for_each(|&node| {
+            mapper.update(node);
+        });
+    }
+}
+
+pub fn node_filter<T: NodeMapper + Sync + ?Sized>(
+    node_subset: &NodeSubset,
+    mapper: &T,
+) -> NodeSubset {
     let node_count = node_subset.node_count();
     let subset_count = node_subset.non_zeroes_count();
 
     if node_subset.is_dense() {
-        let dense = par_vec(node_count, |node| mapper.update(node));
+        let dense = par_vec(node_count, |node| {
+            node_subset.contains(node) && mapper.update(node)
+        });
         NodeSubset::dense(node_count, dense)
     } else {
-        let mut sparse = par_vec(subset_count, |node_id| {
-            if mapper.update(node_id) {
-                node_id
-            } else {
-                usize::MAX
-            }
-        });
+        let mut sparse = Vec::with_capacity(subset_count);
+        node_subset
+            .nodes()
+            .par_iter()
+            .map(|&node| {
+                if mapper.update(node) {
+                    node
+                } else {
+                    usize::MAX
+                }
+            })
+            .collect_into_vec(&mut sparse);
 
         let mut write_index = 0;
         for read_index in 0..subset_count {
