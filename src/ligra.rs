@@ -49,9 +49,13 @@ pub trait RelationshipMapper {
     fn check_always_returns_true(&self) -> bool {
         false
     }
+
+    fn has_no_result(&self) -> bool {
+        self.update_always_returns_true()
+    }
 }
 
-pub fn relationship_map<G, T>(graph: &G, mut node_subset: NodeSubset, mapper: &T) -> NodeSubset
+pub fn relationship_map<G, T>(graph: &G, node_subset: &mut NodeSubset, mapper: &T)
 where
     G: Graph + Sync + ?Sized,
     T: RelationshipMapper + Sync + ?Sized,
@@ -118,87 +122,111 @@ where
 #[cfg(not(feature = "sparse_atomic_pack"))]
 fn relationship_map_sparse<G, T>(
     graph: &G,
-    node_subset: NodeSubset,
+    node_subset: &mut NodeSubset,
     mut degrees: Vec<usize>,
     mapper: &T,
-) -> NodeSubset
-where
+) where
     G: Graph + Sync + ?Sized,
     T: RelationshipMapper + Sync + ?Sized,
 {
-    // before [1 3 3  7]
-    // after  [1 4 7 14]
-    let out_rel_count = degrees
-        .par_iter_mut()
-        .fold_with(0_usize, |sum, degree| {
-            *degree += sum;
-            *degree
-        })
-        .sum::<usize>();
-
-    let offsets = degrees;
-
-    let out_rels = par_vec_with(out_rel_count, || AtomicUsize::new(usize::MAX));
-
-    node_subset
-        .nodes()
-        .par_iter()
-        .zip(offsets.into_par_iter())
-        .for_each(|(node_id, offset)| {
+    if mapper.has_no_result() {
+        node_subset.nodes().par_iter().for_each(|node_id| {
             let source = *node_id;
-            graph
-                .out(source)
-                .par_iter()
-                .enumerate()
-                .for_each(|(j, &target)| {
-                    if mapper.check(target) && mapper.update(source, target) {
-                        out_rels[offset + j].store(target, Ordering::SeqCst)
-                    }
-                })
+            graph.out(source).par_iter().for_each(|&target| {
+                if mapper.check(target) {
+                    mapper.update(source, target);
+                }
+            })
         });
+    } else {
+        // before [1 3 3  7]
+        // after  [1 4 7 14]
+        let out_rel_count = degrees
+            .par_iter_mut()
+            .fold_with(0_usize, |sum, degree| {
+                *degree += sum;
+                *degree
+            })
+            .sum::<usize>();
 
-    let mut out_rels = unsafe { std::mem::transmute::<Vec<AtomicUsize>, Vec<usize>>(out_rels) };
-    let mut write_idx = 0;
+        let offsets = degrees;
 
-    // pack non-max values together
-    for i in 0..out_rels.len() {
-        let target = out_rels[i];
-        if target != usize::MAX {
-            out_rels[write_idx] = target;
-            write_idx += 1;
+        let out_rels = par_vec_with(out_rel_count, || AtomicUsize::new(usize::MAX));
+
+        node_subset
+            .nodes()
+            .par_iter()
+            .zip(offsets.into_par_iter())
+            .for_each(|(node_id, offset)| {
+                let source = *node_id;
+                graph
+                    .out(source)
+                    .par_iter()
+                    .enumerate()
+                    .for_each(|(j, &target)| {
+                        if mapper.check(target) && mapper.update(source, target) {
+                            out_rels[offset + j].store(target, Ordering::SeqCst)
+                        }
+                    })
+            });
+
+        let mut out_rels = unsafe { std::mem::transmute::<Vec<AtomicUsize>, Vec<usize>>(out_rels) };
+        let mut write_idx = 0;
+
+        // pack non-max values together
+        for i in 0..out_rels.len() {
+            let target = out_rels[i];
+            if target != usize::MAX {
+                out_rels[write_idx] = target;
+                write_idx += 1;
+            }
         }
+
+        out_rels.truncate(write_idx);
+
+        *node_subset = NodeSubset::sparse(node_subset.node_count(), out_rels);
     }
-
-    out_rels.truncate(write_idx);
-
-    NodeSubset::sparse(node_subset.node_count(), out_rels)
 }
 
-fn relationship_map_dense<G, T>(graph: &G, node_subset: NodeSubset, mapper: &T) -> NodeSubset
+fn relationship_map_dense<G, T>(graph: &G, node_subset: &mut NodeSubset, mapper: &T)
 where
     G: Graph + Sync + ?Sized,
     T: RelationshipMapper + Sync + ?Sized,
 {
     let node_count = graph.node_count();
 
-    let next = par_vec_with(node_count, AtomicBool::default);
-
-    (0..node_count).into_par_iter().for_each(|target| {
-        if mapper.check(target) {
-            for &source in graph.inc(target) {
-                if node_subset.contains(source) && mapper.update(source, target) {
-                    next[source].store(true, Ordering::SeqCst);
-                }
-                if !mapper.check(target) {
-                    break;
+    if mapper.has_no_result() {
+        (0..node_count).into_par_iter().for_each(|target| {
+            if mapper.check(target) {
+                for &source in graph.inc(target) {
+                    if node_subset.contains(source) {
+                        mapper.update(source, target);
+                    }
+                    if !mapper.check(target) {
+                        break;
+                    }
                 }
             }
-        }
-    });
+        });
+    } else {
+        let next = par_vec_with(node_count, AtomicBool::default);
 
-    let next = unsafe { std::mem::transmute::<Vec<AtomicBool>, Vec<bool>>(next) };
+        (0..node_count).into_par_iter().for_each(|target| {
+            if mapper.check(target) {
+                for &source in graph.inc(target) {
+                    if node_subset.contains(source) && mapper.update(source, target) {
+                        next[source].store(true, Ordering::SeqCst);
+                    }
+                    if !mapper.check(target) {
+                        break;
+                    }
+                }
+            }
+        });
 
-    NodeSubset::dense(node_count, next)
+        let next = unsafe { std::mem::transmute::<Vec<AtomicBool>, Vec<bool>>(next) };
+        *node_subset = NodeSubset::dense(node_count, next);
+    }
 }
 
 pub trait NodeMapper {

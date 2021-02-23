@@ -114,7 +114,7 @@ mod cc {
 
         while frontier.len() != 0 {
             frontier = ligra::node_map(&frontier, &cc);
-            frontier = ligra::relationship_map(&graph, frontier, &cc);
+            ligra::relationship_map(&graph, &mut frontier, &cc);
         }
 
         cc.ids
@@ -159,7 +159,7 @@ mod bfs {
 
         let mut frontier = ligra::NodeSubset::single(graph.node_count(), root);
         while frontier.len() != 0 {
-            frontier = ligra::relationship_map(&graph, frontier, &bfs);
+            ligra::relationship_map(&graph, &mut frontier, &bfs);
         }
 
         bfs.parents
@@ -233,6 +233,10 @@ mod pagerank_delta {
         fn check_always_returns_true(&self) -> bool {
             true
         }
+
+        fn has_no_result(&self) -> bool {
+            true
+        }
     }
 
     impl<'g, G: Graph> PageRankDelta<'g, G> {
@@ -271,7 +275,7 @@ mod pagerank_delta {
         let mut frontier = NodeSubset::full(graph.node_count());
 
         // first iteration  -- todo: no_output
-        ligra::relationship_map(&graph, frontier, &pr);
+        ligra::relationship_map(&graph, &mut frontier, &pr);
         frontier = ligra::node_map(&all_nodes, &FirstRound(&pr));
 
         // remaining iterations
@@ -283,7 +287,7 @@ mod pagerank_delta {
                 break;
             }
 
-            ligra::relationship_map(&graph, frontier, &pr);
+            ligra::relationship_map(&graph, &mut frontier, &pr);
             frontier = ligra::node_map(&all_nodes, &pr);
         }
 
