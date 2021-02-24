@@ -112,7 +112,7 @@ mod cc {
 
         let mut frontier = ligra::NodeSubset::full(graph.node_count());
 
-        while frontier.len() != 0 {
+        while frontier.subset_count() != 0 {
             frontier = ligra::node_filter(&frontier, &cc);
             ligra::relationship_map(&graph, &mut frontier, &cc);
         }
@@ -158,7 +158,7 @@ mod bfs {
         bfs.parents[root] = AtomicUsize::new(root);
 
         let mut frontier = ligra::NodeSubset::single(graph.node_count(), root);
-        while frontier.len() != 0 {
+        while frontier.subset_count() != 0 {
             ligra::relationship_map(&graph, &mut frontier, &bfs);
         }
 

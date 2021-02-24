@@ -60,7 +60,7 @@ where
     G: Graph + Sync + ?Sized,
     T: RelationshipMapper + Sync + ?Sized,
 {
-    let subset_size = node_subset.len(); // m
+    let subset_size = node_subset.subset_count();
 
     let degrees = if node_subset.is_dense() {
         par_vec(node_subset.node_count(), |node_id| {
@@ -258,7 +258,7 @@ pub fn node_filter<T: NodeMapper + Sync + ?Sized>(
     mapper: &T,
 ) -> NodeSubset {
     let node_count = node_subset.node_count();
-    let subset_count = node_subset.non_zeroes_count();
+    let subset_count = node_subset.subset_count();
 
     if node_subset.is_dense() {
         let dense = par_vec(node_count, |node| {
