@@ -144,7 +144,7 @@ where
 #[cfg(not(feature = "sparse_atomic_pack"))]
 fn relationship_map_sparse_output<G, T>(
     graph: &G,
-    node_subset: NodeSubset,
+    node_subset: &NodeSubset,
     mut degrees: Vec<usize>,
     mapper: &T,
 ) -> NodeSubset
