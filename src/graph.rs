@@ -455,3 +455,88 @@ pub fn load(mut input: impl Read) -> Result<AdjacencyGraph> {
 
     Ok(AdjacencyGraph { out, inc })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub trait FilterGraph: Graph {
+        type Delegate: Graph;
+
+        fn delegate(&self) -> &Self::Delegate;
+
+        fn node_count(&self) -> usize {
+            Graph::node_count(self.delegate())
+        }
+
+        fn rel_count(&self) -> usize {
+            Graph::rel_count(self.delegate())
+        }
+
+        fn out(&self, node: usize) -> &[usize] {
+            Graph::out(self.delegate(), node)
+        }
+
+        fn inc(&self, node: usize) -> &[usize] {
+            Graph::inc(self.delegate(), node)
+        }
+
+        fn out_degree(&self, node: usize) -> usize {
+            Graph::out_degree(self.delegate(), node)
+        }
+
+        fn inc_degree(&self, node: usize) -> usize {
+            Graph::inc_degree(self.delegate(), node)
+        }
+
+        fn threshold(&self) -> usize {
+            Graph::threshold(self.delegate())
+        }
+    }
+
+    impl<T> Graph for T
+    where
+        T: FilterGraph,
+    {
+        fn node_count(&self) -> usize {
+            FilterGraph::node_count(self)
+        }
+
+        fn rel_count(&self) -> usize {
+            FilterGraph::rel_count(self)
+        }
+
+        fn out(&self, node: usize) -> &[usize] {
+            FilterGraph::out(self, node)
+        }
+
+        fn inc(&self, node: usize) -> &[usize] {
+            FilterGraph::inc(self, node)
+        }
+
+        fn out_degree(&self, node: usize) -> usize {
+            FilterGraph::out_degree(self, node)
+        }
+
+        fn inc_degree(&self, node: usize) -> usize {
+            FilterGraph::inc_degree(self, node)
+        }
+    }
+
+    struct FortyTwoGraph<T>(T);
+
+    impl<T: Graph> FilterGraph for FortyTwoGraph<T> {
+        type Delegate = T;
+
+        fn delegate(&self) -> &Self::Delegate {
+            &self.0
+        }
+
+        fn node_count(&self) -> usize {
+            42
+        }
+    }
+
+    #[test]
+    fn adjacency_graph() {}
+}
