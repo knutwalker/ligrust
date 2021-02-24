@@ -1,3 +1,4 @@
 !.github/
 /target
 ligrust.code-workspace
+.idea
