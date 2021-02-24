@@ -304,3 +304,37 @@ pub fn node_filter<T: NodeMapper + Sync + ?Sized>(
         NodeSubset::sparse_counted(node_count, write_index, sparse)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use quickcheck::Arbitrary;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct NodeCount(usize);
+
+    impl Arbitrary for NodeCount {
+        fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+            NodeCount(g.size())
+        }
+    }
+
+    #[quickcheck]
+    fn test_par_vec(nodes: Vec<usize>) -> bool {
+        let actual = par_vec(nodes.len(), |idx| nodes[idx]);
+        actual == nodes
+    }
+
+    #[quickcheck]
+    fn test_par_vec_copy(node_count: NodeCount, element: usize) -> bool {
+        let actual = par_vec_copy(node_count.0, element);
+        (0..node_count.0).all(|i| actual[i] == element)
+    }
+
+    #[quickcheck]
+    fn test_par_vec_with(node_count: NodeCount, element: usize) -> bool {
+        let actual = par_vec_with(node_count.0, || element);
+        (0..node_count.0).all(|i| actual[i] == element)
+    }
+}

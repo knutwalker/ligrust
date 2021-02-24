@@ -1,5 +1,11 @@
 #![feature(array_windows, never_type, new_uninit, vec_into_raw_parts)]
 
+#[cfg(test)]
+extern crate quickcheck;
+#[cfg(test)]
+#[macro_use(quickcheck)]
+extern crate quickcheck_macros;
+
 #[macro_use]
 extern crate eyre;
 
