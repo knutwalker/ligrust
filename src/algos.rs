@@ -6,9 +6,11 @@ pub fn run_cc(input: PathBuf) -> Result<()> {
 
     let start = Instant::now();
 
-    let cc = cc::cc(graph);
+    let cc = cc_union_find::cc(graph);
 
     println!("cc done with {} nodes: {:?}", cc.len(), start.elapsed());
+
+    firestorm::save("./").unwrap();
 
     Ok(())
 }
@@ -118,6 +120,61 @@ mod cc {
         }
 
         cc.ids
+    }
+}
+
+mod cc_union_find {
+    use crate::{
+        graph::Graph,
+        ligra::{self, RelationshipMapper},
+    };
+    use disjoint_sets::AUnionFind;
+    pub(crate) use firestorm::{profile_fn, profile_section};
+    use ligra::par_vec;
+
+    struct CCUnionFind {
+        uf: AUnionFind,
+    }
+
+    impl RelationshipMapper for CCUnionFind {
+        fn update(&self, source: usize, target: usize) -> bool {
+            self.uf.union(source, target);
+            true
+        }
+
+        fn check_always_returns_true(&self) -> bool {
+            true
+        }
+
+        fn update_always_returns_true(&self) -> bool {
+            true
+        }
+    }
+
+    impl CCUnionFind {
+        fn new(node_count: usize) -> Self {
+            Self {
+                uf: AUnionFind::new(node_count),
+            }
+        }
+    }
+
+    pub(crate) fn cc<G: Graph + Sync>(graph: G) -> Vec<usize> {
+        profile_fn!(cc_union_find::cc);
+        let (cc, mut frontier) = {
+            profile_section!(setup);
+            let cc = CCUnionFind::new(graph.node_count());
+            let frontier = ligra::NodeSubset::full(graph.node_count());
+            (cc, frontier)
+        };
+        {
+            profile_section!(relationship_map);
+            ligra::relationship_map(&graph, &mut frontier, &cc);
+        }
+        {
+            profile_section!(find);
+            par_vec(graph.node_count(), |node_id| cc.uf.find(node_id))
+        }
     }
 }
 
