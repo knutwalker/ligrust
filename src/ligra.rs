@@ -227,7 +227,7 @@ where
             if mapper.check(target) {
                 for &source in graph.inc(target) {
                     if node_subset.contains(source) && mapper.update(source, target) {
-                        next[source].store(true, Ordering::SeqCst);
+                        next[target].store(true, Ordering::SeqCst);
                     }
                     if !mapper.check(target) {
                         break;
@@ -307,6 +307,7 @@ pub fn node_filter<T: NodeMapper + Sync + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use crate::graph::{self, tests::MockGraph};
     use quickcheck::Arbitrary;
 
     use super::*;
@@ -336,5 +337,35 @@ mod tests {
     fn test_par_vec_with(node_count: NodeCount, element: usize) -> bool {
         let actual = par_vec_with(node_count.0, || element);
         (0..node_count.0).all(|i| actual[i] == element)
+    }
+
+    struct FnMapper<F: Fn(usize, usize) -> bool + Send + Sync>(F);
+
+    impl<F: Fn(usize, usize) -> bool + Send + Sync> RelationshipMapper for FnMapper<F> {
+        fn update(&self, source: usize, target: usize) -> bool {
+            self.0(source, target)
+        }
+    }
+
+    #[test]
+    fn test_relationship_map() {
+        // 0 -> 1 -> 2 -> 3
+        let input = vec![vec![1], vec![2], vec![3], vec![]];
+        let graph = MockGraph::new(input);
+        let mut node_subset = NodeSubset::single(graph.node_count(), 1);
+
+        relationship_map(
+            &graph,
+            &mut node_subset,
+            &FnMapper(|source, target| {
+                assert_eq!(source, 1);
+                assert_eq!(target, 2);
+                true
+            }),
+        );
+
+        assert!(node_subset.is_dense());
+        node_subset.to_sparse();
+        assert!(dbg!(node_subset.nodes()).eq(vec![2].as_slice()));
     }
 }
