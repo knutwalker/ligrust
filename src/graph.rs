@@ -457,7 +457,7 @@ pub fn load(mut input: impl Read) -> Result<AdjacencyGraph> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub trait FilterGraph: Graph {
@@ -523,17 +523,56 @@ mod tests {
         }
     }
 
-    struct FortyTwoGraph<T>(T);
+    #[derive(Default)]
+    pub(crate) struct MockGraph {
+        out: Vec<Vec<usize>>,
+        inc: Vec<Vec<usize>>,
+    }
 
-    impl<T: Graph> FilterGraph for FortyTwoGraph<T> {
-        type Delegate = T;
+    impl MockGraph {
+        pub fn new(out: Vec<Vec<usize>>) -> Self {
+            let mut inc = vec![];
+            for (source, targets) in out.iter().enumerate() {
+                for target in targets.iter() {
+                    if *target >= inc.len() {
+                        inc.resize_with(target + 1, Vec::new);
+                    }
+                    inc[*target].push(source)
+                }
+            }
+            MockGraph { out, inc }
+        }
+    }
 
-        fn delegate(&self) -> &Self::Delegate {
-            &self.0
+    impl Graph for MockGraph {
+        fn node_count(&self) -> usize {
+            self.out.len()
         }
 
-        fn node_count(&self) -> usize {
-            42
+        fn rel_count(&self) -> usize {
+            self.out.iter().map(|targets| targets.len()).sum()
+        }
+
+        fn out(&self, node: usize) -> &[usize] {
+            match self.out.get(node) {
+                Some(targets) => targets.as_slice(),
+                None => &[],
+            }
+        }
+
+        fn inc(&self, node: usize) -> &[usize] {
+            match self.inc.get(node) {
+                Some(sources) => sources.as_slice(),
+                None => &[],
+            }
+        }
+
+        fn out_degree(&self, node: usize) -> usize {
+            self.out(node).len()
+        }
+
+        fn inc_degree(&self, node: usize) -> usize {
+            self.inc(node).len()
         }
     }
 
