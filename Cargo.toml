@@ -14,7 +14,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 atoi = "0.4.0"
 atomic_float = "0.1.0"
-byte-slice-cast = "1.0.0"
+byte-slice-cast = "1.2.0"
 eyre = "0.6.5"
 linereader = "0.4.0"
 memmap = { version = "0.7.0", optional = true }
